@@ -81,6 +81,9 @@ pub struct CheckoutPage {
     pub selected: Option<MethodView>,
     pub error_message: Option<String>,
     pub paid_reference: Option<String>,
+    /// Merchant return URL (with success params) when the success screen
+    /// should count down and hand the customer back to the merchant.
+    pub redirect_url: Option<String>,
 }
 
 pub struct ItemView {
@@ -287,6 +290,19 @@ pub async fn checkout_page(
 
     let error_message = params.get("error").map(|reason| error_text(reason, &amount_display));
 
+    // Success visit straight after verifying (?paid=1): show the success
+    // screen, count down a few seconds, then send the customer to the
+    // merchant's returnUrl. Plain visits to a paid checkout never redirect.
+    let redirect_url = if checkout.status == "succeeded"
+        && params.get("paid").map(String::as_str) == Some("1")
+    {
+        paid_reference
+            .as_deref()
+            .and_then(|r| merchant_return_url(&checkout.return_url, &checkout.id, r))
+    } else {
+        None
+    };
+
     let step: u8 = if checkout.status == "succeeded" {
         3
     } else if checkout.status == "pending" && selected.is_some() && !wants_change {
@@ -318,6 +334,7 @@ pub async fn checkout_page(
         selected,
         error_message,
         paid_reference,
+        redirect_url,
     };
 
     match page.render() {
@@ -409,21 +426,13 @@ pub async fn verify_form(
         return simple_page(StatusCode::FORBIDDEN, "Your session expired. Go back and reload the page.");
     }
 
-    let return_url = match domain::load_checkout(&state.pool, &checkout_id).await {
-        Ok(Some(c)) => c.return_url,
-        Ok(None) => return simple_page(StatusCode::NOT_FOUND, "This checkout link does not exist."),
-        Err(e) => return db_error_page(e),
-    };
-
     let reference = form.transaction_reference.trim().to_string();
     if reference.is_empty() {
         return see_other(format!("/c/{checkout_id}?error=transaction_not_found"));
     }
 
     match domain::verify_checkout(&state, &checkout_id, &reference).await {
-        Ok(VerifyResult::Succeeded { reference, .. }) => {
-            redirect_after_success(&return_url, &checkout_id, &reference)
-        }
+        Ok(VerifyResult::Succeeded { .. }) => see_other(format!("/c/{checkout_id}?paid=1")),
         Ok(VerifyResult::Failed { reason, .. }) => see_other(format!("/c/{checkout_id}?error={reason}")),
         Ok(VerifyResult::AlreadyUsed) => see_other(format!("/c/{checkout_id}?error=transaction_already_used")),
         Ok(VerifyResult::NotPending { checkout_status }) => {
@@ -446,17 +455,15 @@ pub async fn verify_form(
     }
 }
 
-fn redirect_after_success(return_url: &Option<String>, checkout_id: &str, reference: &str) -> Response {
-    if let Some(url) = return_url {
-        if let Ok(mut parsed) = url::Url::parse(url) {
-            {
-                let mut pairs = parsed.query_pairs_mut();
-                pairs.append_pair("checkoutId", checkout_id);
-                pairs.append_pair("reference", reference);
-                pairs.append_pair("status", "succeeded");
-            }
-            return Redirect::to(parsed.as_str()).into_response();
-        }
+/// Merchant return URL with the success query parameters appended. The
+/// success screen redirects the customer here after its short countdown.
+fn merchant_return_url(return_url: &Option<String>, checkout_id: &str, reference: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(return_url.as_deref()?).ok()?;
+    {
+        let mut pairs = parsed.query_pairs_mut();
+        pairs.append_pair("checkoutId", checkout_id);
+        pairs.append_pair("reference", reference);
+        pairs.append_pair("status", "succeeded");
     }
-    see_other(format!("/c/{checkout_id}"))
+    Some(parsed.to_string())
 }

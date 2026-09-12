@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ merchant_name }} — Checkout {{ reference }}</title>
+  {% match redirect_url %}{% when Some with (url) %}
+  <meta http-equiv="refresh" content="5; url={{ url }}" />
+  {% when None %}{% endmatch %}
   <style>
     :root {
       --ink: #111827;
@@ -67,6 +70,9 @@
       display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none;
     }
     .success p { font-size: 13px; margin-top: 8px; color: #047857; }
+    .success .redirect { margin-top: 10px; }
+    .success .redirect a { color: var(--brand); font-weight: 600; }
+    .success .ref-chip { color: #047857; }
 
     /* method buttons */
     .choose { font-size: 13px; color: var(--muted); margin: 18px 0 10px; }
@@ -139,6 +145,56 @@
     }
     .dots span.on { background: var(--brand); width: 18px; border-radius: 4px; }
 
+    /* steps table + hint variants: mobile keeps the swipe carousel with
+       captions on the slides; wide screens swap in the steps table */
+    .hint-auto { display: none; }
+    .steps-table { display: none; }
+
+    /* --- parallel layout (wide screens): checkout beside the how-to-pay instructions --- */
+    @media (min-width: 960px) {
+      .wrap.wide { max-width: 1000px; }
+
+      .card.card-parallel {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+        gap: 8px 48px;
+        align-items: start;
+      }
+      .card.card-parallel .checkout-side { grid-column: 1; }
+      .card.card-parallel .how-side { grid-column: 2; position: sticky; top: 24px; }
+
+      .hint-touch { display: none; }
+      .hint-auto { display: inline; }
+      .how-side .show-nav { display: none; }
+      .slide figcaption { display: none; }
+
+      /* cap the walkthrough height; the phone slide centers on the dark strip */
+      .how-side .carousel { height: 300px; }
+      .how-side .slide { justify-content: center; align-items: center; }
+      .how-side .slide img { width: auto; height: 100%; margin: 0 auto; border-radius: 0; }
+
+      .steps-table {
+        display: table; width: 100%; margin-top: 12px;
+        border-collapse: separate; border-spacing: 0;
+      }
+      .steps-table tr { cursor: pointer; }
+      .steps-table td {
+        padding: 10px 8px; border-bottom: 1px solid var(--line);
+        font-size: 13.5px; line-height: 1.4; color: #374151; vertical-align: middle;
+        transition: background .15s;
+      }
+      .steps-table tr:first-child td { border-top: 1px solid var(--line); }
+      .steps-table td.n { width: 30px; }
+      .steps-table .n span {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 22px; height: 22px; border-radius: 50%;
+        background: #fff; border: 1.5px solid var(--line); color: var(--muted);
+        font-size: 11px; font-weight: 700;
+      }
+      .steps-table tr.on td { color: var(--ink); font-weight: 600; background: var(--brand-soft); }
+      .steps-table tr.on .n span { background: var(--brand); border-color: var(--brand); color: #fff; }
+    }
+
     label[for=txref] { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
     input[type=text] {
       width: 100%; border: 1.5px solid var(--line); border-radius: 12px;
@@ -165,14 +221,15 @@
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap{% if show_instructions %} wide{% endif %}">
     <div class="steps">
       <div class="step {% if step == 1 %}on{% endif %} {% if step > 1 %}done{% endif %}"><span class="dot">{% if step > 1 %}&#10003;{% else %}1{% endif %}</span> Method<span class="bar"></span></div>
       <div class="step {% if step == 2 %}on{% endif %} {% if step > 2 %}done{% endif %}"><span class="dot">{% if step > 2 %}&#10003;{% else %}2{% endif %}</span> Pay<span class="bar"></span></div>
       <div class="step {% if step == 3 %}on{% endif %}"><span class="dot">3</span> Confirm</div>
     </div>
 
-    <div class="card">
+    <div class="card{% if show_instructions %} card-parallel{% endif %}">
+      <div class="checkout-side">
       <div class="merchant">{{ merchant_name }}</div>
       <h1>{{ reference }}</h1>
 
@@ -213,47 +270,68 @@
         {% endfor %}
       {% endif %}
 
+      {% if show_instructions %}{% match selected %}{% when Some with (s) %}
+      <div class="payto">
+        <div class="label">Send exactly {{ amount_display }} to</div>
+        <div class="row">
+          <b id="acct">{{ s.account_identifier }}</b>
+          <button class="copy" type="button" id="copyBtn" onclick="copyAcct()">Copy</button>
+        </div>
+      </div>
+      <form method="post" action="/c/{{ checkout_id }}/verify" class="verify" id="verifyForm">
+        <input type="hidden" name="csrf" value="{{ csrf }}" />
+        <label for="txref">Transaction reference</label>
+        <input type="text" id="txref" name="transaction_reference" placeholder="FT123456789" maxlength="64" autocomplete="off" autofocus required />
+        <p class="hint">Find it in your {{ s.display_name }} confirmation. It is not the receipt number.</p>
+        <button class="pay" type="submit" id="verifyBtn">Verify Payment</button>
+      </form>
+      {% when None %}{% endmatch %}{% endif %}
+      </div>
+
       {% if show_instructions %}
+      <div class="how-side">
         {% match selected %}{% when Some with (s) %}
-        <div class="payto">
-          <div class="label">Send exactly {{ amount_display }} to</div>
-          <div class="row">
-            <b id="acct">{{ s.account_identifier }}</b>
-            <button class="copy" type="button" id="copyBtn" onclick="copyAcct()">Copy</button>
-          </div>
-        </div>
         {% if has_slides %}
-        <p class="show-title">How to pay with {{ s.display_name }}</p>
-        <p class="show-hint">Swipe through the steps &#8592; &#8594;</p>
-        <div class="carousel" id="carousel">
-          {% for slide in slides %}
-          <figure class="slide">
-            <img src="{{ slide.src }}" alt="{{ slide.caption }}" />
-            <figcaption><b>{{ loop.index }}</b>{{ slide.caption }}</figcaption>
-          </figure>
-          {% endfor %}
-        </div>
-        <div class="show-nav">
-          <button type="button" class="arrow" id="slidePrev" aria-label="Previous step">&#8249;</button>
-          <div class="dots" id="slideDots">
-            {% for slide in slides %}<span{% if loop.index == 1 %} class="on"{% endif %}></span>{% endfor %}
+        <div class="instructions">
+          <p class="show-title">How to pay with {{ s.display_name }}</p>
+          <p class="show-hint">
+            <span class="hint-touch">Swipe through the steps &#8592; &#8594;</span>
+            <span class="hint-auto">Steps advance on their own &mdash; click one to jump</span>
+          </p>
+          <div class="carousel" id="carousel">
+            {% for slide in slides %}
+            <figure class="slide">
+              <img src="{{ slide.src }}" alt="{{ slide.caption }}" />
+              <figcaption><b>{{ loop.index }}</b>{{ slide.caption }}</figcaption>
+            </figure>
+            {% endfor %}
           </div>
-          <button type="button" class="arrow" id="slideNext" aria-label="Next step">&#8250;</button>
+          <div class="show-nav">
+            <button type="button" class="arrow" id="slidePrev" aria-label="Previous step">&#8249;</button>
+            <div class="dots" id="slideDots">
+              {% for slide in slides %}<span{% if loop.index == 1 %} class="on"{% endif %}></span>{% endfor %}
+            </div>
+            <button type="button" class="arrow" id="slideNext" aria-label="Next step">&#8250;</button>
+          </div>
+          <table class="steps-table" id="stepsTable" aria-label="Payment steps">
+            <tbody>
+            {% for slide in slides %}
+              <tr data-step="{{ loop.index0 }}"{% if loop.first %} class="on"{% endif %}>
+                <td class="n"><span>{{ loop.index }}</span></td>
+                <td>{{ slide.caption }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
         </div>
         {% else %}
         <ol class="howto">
           {% for line in s.instruction_lines %}<li>{{ line }}</li>{% endfor %}
         </ol>
         {% endif %}
-        <form method="post" action="/c/{{ checkout_id }}/verify" class="verify" id="verifyForm">
-          <input type="hidden" name="csrf" value="{{ csrf }}" />
-          <label for="txref">Transaction reference</label>
-          <input type="text" id="txref" name="transaction_reference" placeholder="FT123456789" maxlength="64" autocomplete="off" autofocus required />
-          <p class="hint">Find it in your {{ s.display_name }} confirmation. It is not the receipt number.</p>
-          <button class="pay" type="submit" id="verifyBtn">Verify Payment</button>
-        </form>
         {% if show_change_method %}<a class="change" href="/c/{{ checkout_id }}?change=1">&#8592; Use a different payment method</a>{% endif %}
         {% when None %}{% endmatch %}
+      </div>
       {% endif %}
 
       {% if show_succeeded %}
@@ -261,6 +339,9 @@
         <div class="big"><span class="check">&#10003;</span> Payment successful</div>
         <p>{{ amount_display }} paid to {{ merchant_name }}. Thank you!</p>
         {% match paid_reference %}{% when Some with (r) %}<p class="ref-chip">Transaction reference: {{ r }}</p>{% when None %}{% endmatch %}
+        {% match redirect_url %}{% when Some with (url) %}
+        <p class="redirect">Taking you back in <b id="secs">5</b>s &middot; <a href="{{ url }}">Continue now</a></p>
+        {% when None %}{% endmatch %}
       </div>
       {% endif %}
     </div>
@@ -296,14 +377,29 @@
         btn.textContent = 'Verifying\u2026';
       });
     }
+    // Success screen: count down the 5 s pause on this page; the meta
+    // refresh in <head> then sends the customer to the merchant's returnUrl.
+    var secs = document.getElementById('secs');
+    if (secs) {
+      var left = 5;
+      var tick = window.setInterval(function () {
+        left -= 1;
+        if (left <= 0) { window.clearInterval(tick); return; }
+        secs.textContent = String(left);
+      }, 1000);
+    }
     // App-walkthrough slideshow: native scroll-snap handles touch swipes;
     // arrows and dots scroll to a slide index, and scrolling updates the dots.
+    // On wide screens the same carousel lives inside a laptop mockup, a steps
+    // table beside it mirrors the active step, and the show auto-advances.
     var carousel = document.getElementById('carousel');
     if (carousel) {
       var slides = carousel.querySelectorAll('.slide');
       var dots = document.getElementById('slideDots').children;
       var prev = document.getElementById('slidePrev');
       var next = document.getElementById('slideNext');
+      var table = document.getElementById('stepsTable');
+      var rows = table ? table.querySelectorAll('tr') : [];
       var current = 0;
 
       function show(i) {
@@ -313,19 +409,43 @@
       function syncDots() {
         current = Math.round(carousel.scrollLeft / Math.max(1, carousel.clientWidth));
         for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i === current);
+        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('on', j === current);
         prev.disabled = current === 0;
         next.disabled = current === slides.length - 1;
       }
-      prev.addEventListener('click', function () { show(current - 1); });
-      next.addEventListener('click', function () { show(current + 1); });
+      prev.addEventListener('click', function () { show(current - 1); restartAuto(); });
+      next.addEventListener('click', function () { show(current + 1); restartAuto(); });
       for (var i = 0; i < dots.length; i++) {
-        (function (i) { dots[i].addEventListener('click', function () { show(i); }); })(i);
+        (function (i) { dots[i].addEventListener('click', function () { show(i); restartAuto(); }); })(i);
+      }
+      for (var k = 0; k < rows.length; k++) {
+        (function (k) { rows[k].addEventListener('click', function () { show(k); restartAuto(); }); })(k);
       }
       carousel.addEventListener('scroll', function () {
         window.clearTimeout(carousel._t);
         carousel._t = window.setTimeout(syncDots, 80);
       });
       syncDots();
+
+      // Auto-advance: loops through the steps, pausing while hovered or the
+      // tab is hidden; manual navigation restarts the clock; reduced-motion
+      // users never see it move on its own.
+      var AUTO_MS = 3500;
+      var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var autoTimer = null;
+      var hovering = false;
+      carousel.addEventListener('mouseenter', function () { hovering = true; });
+      carousel.addEventListener('mouseleave', function () { hovering = false; });
+      function restartAuto() {
+        if (autoTimer) window.clearInterval(autoTimer);
+        autoTimer = null;
+        if (reduceMotion || slides.length < 2) return;
+        autoTimer = window.setInterval(function () {
+          if (document.hidden || hovering) return;
+          show((current + 1) % slides.length);
+        }, AUTO_MS);
+      }
+      restartAuto();
     }
   </script>
 </body>
