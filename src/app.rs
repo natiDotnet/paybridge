@@ -41,6 +41,10 @@ pub fn build_app(state: AppState) -> Router {
             post(crate::public_verify::verify),
         )
         .nest("/c", hosted)
+        .nest_service(
+            "/static",
+            tower_http::services::ServeDir::new(&state.config.static_dir),
+        )
         .route("/docs", get(crate::docs::scalar_docs))
         .route("/api-docs/openapi.json", get(crate::docs::openapi_json))
         .with_state(state)

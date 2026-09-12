@@ -1,0 +1,7 @@
+[
+  { "image": "step-1.svg", "caption": "Open the Telebirr app and sign in" },
+  { "image": "step-2.svg", "caption": "Tap Send Money on the home screen" },
+  { "image": "step-3.svg", "caption": "Enter the phone number shown on this page" },
+  { "image": "step-4.svg", "caption": "Enter the exact amount of this checkout" },
+  { "image": "step-5.svg", "caption": "Confirm the payment, then copy the transaction reference" }
+]

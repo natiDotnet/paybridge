@@ -3,85 +3,329 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ merchant_name }} — Checkout</title>
+  <title>{{ merchant_name }} — Checkout {{ reference }}</title>
   <style>
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f4f6f5; color: #1a1a1a; display: flex; justify-content: center; padding: 40px 16px; }
-    .card { background: #fff; border-radius: 16px; box-shadow: 0 6px 24px rgba(0,0,0,.08); padding: 32px; width: 100%; max-width: 420px; }
-    .merchant { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; }
-    h1 { font-size: 18px; margin: 6px 0 18px; font-weight: 600; }
-    .amount { font-size: 34px; font-weight: 700; margin-bottom: 22px; }
-    .error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 10px; padding: 10px 14px; font-size: 14px; margin-bottom: 18px; }
-    .success { background: #ecfdf5; border: 1px solid #a7f3d0; color: #047857; border-radius: 10px; padding: 16px; font-size: 15px; }
-    .muted { color: #6b7280; font-size: 13px; }
-    .payto { display: flex; align-items: center; gap: 8px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin: 10px 0 18px; }
-    .payto b { font-size: 17px; letter-spacing: .02em; }
-    .copy { margin-left: auto; border: 1px solid #d1d5db; background: #fff; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+    :root {
+      --ink: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --brand: #047857;
+      --brand-soft: #ecfdf5;
+      --danger: #b91c1c;
+      --danger-soft: #fef2f2;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #f3f6f5; color: var(--ink);
+      min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+      padding: 28px 16px 40px;
+    }
+    .wrap { width: 100%; max-width: 430px; }
+
+    /* stepper */
+    .steps { display: flex; gap: 6px; margin-bottom: 14px; }
+    .step { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .step .dot {
+      width: 22px; height: 22px; border-radius: 50%; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; background: #fff; border: 1.5px solid var(--line); color: var(--muted);
+    }
+    .step.on { color: var(--brand); font-weight: 600; }
+    .step.on .dot { background: var(--brand); border-color: var(--brand); color: #fff; }
+    .step.done .dot { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+    .step .bar { flex: 1; height: 2px; background: var(--line); border-radius: 1px; }
+    .step:last-child .bar { display: none; }
+
+    .card {
+      background: #fff; border-radius: 18px; padding: 24px;
+      box-shadow: 0 8px 30px rgba(17, 24, 39, .08);
+    }
+
+    .merchant { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+    h1 { font-size: 17px; font-weight: 600; margin: 4px 0 16px; word-break: break-word; }
+
+    /* items + total */
+    .items { border-top: 1px solid var(--line); }
+    .item { display: flex; align-items: baseline; gap: 8px; padding: 10px 0; font-size: 14px; border-bottom: 1px solid var(--line); }
+    .item .name { flex: 1; }
+    .item .qty { color: var(--muted); font-size: 12px; }
+    .item .unit { color: var(--muted); font-size: 12px; }
+    .total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 0 4px; }
+    .total span:first-child { font-size: 13px; color: var(--muted); }
+    .amount { font-size: 32px; font-weight: 700; letter-spacing: -.01em; }
+
+    /* notices */
+    .error {
+      background: var(--danger-soft); border: 1px solid #fecaca; color: var(--danger);
+      border-radius: 12px; padding: 12px 14px; font-size: 14px; margin: 14px 0 4px; line-height: 1.45;
+    }
+    .success { background: var(--brand-soft); border: 1px solid #a7f3d0; color: #065f46; border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .success .big { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; }
+    .success .check {
+      width: 30px; height: 30px; border-radius: 50%; background: var(--brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none;
+    }
+    .success p { font-size: 13px; margin-top: 8px; color: #047857; }
+
+    /* method buttons */
+    .choose { font-size: 13px; color: var(--muted); margin: 18px 0 10px; }
+    button.method {
+      width: 100%; display: flex; align-items: center; gap: 12px;
+      background: #fff; border: 1.5px solid var(--line); border-radius: 14px;
+      padding: 14px 16px; font-size: 15px; font-weight: 600; color: var(--ink);
+      cursor: pointer; margin-bottom: 10px; transition: border-color .15s, background .15s;
+    }
+    button.method:hover { border-color: var(--brand); background: var(--brand-soft); }
+    .badge {
+      width: 34px; height: 34px; border-radius: 10px; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; font-weight: 800; color: #fff; background: var(--brand);
+    }
+    .method .sub { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+    .method .go { margin-left: auto; color: var(--muted); font-weight: 400; }
+
+    /* pay-to card */
+    .payto {
+      background: #f9fafb; border: 1px solid var(--line); border-radius: 14px;
+      padding: 14px 16px; margin-top: 16px;
+    }
+    .payto .label { font-size: 12px; color: var(--muted); }
+    .payto .row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+    .payto b { font-size: 20px; letter-spacing: .03em; font-family: ui-monospace, "Cascadia Mono", monospace; }
+    .copy {
+      margin-left: auto; border: 1px solid var(--line); background: #fff; border-radius: 9px;
+      padding: 7px 12px; cursor: pointer; font-size: 13px; color: var(--ink); flex: none;
+    }
     .copy:hover { background: #f3f4f6; }
-    ol { margin: 0 0 18px 20px; padding: 0; color: #374151; font-size: 14px; }
-    ol li { margin-bottom: 6px; }
-    label { font-size: 13px; color: #374151; display: block; margin-bottom: 6px; }
-    input[type=text] { width: 100%; border: 1px solid #d1d5db; border-radius: 10px; padding: 12px 14px; font-size: 15px; margin-bottom: 12px; }
-    button.pay, button.method { width: 100%; background: #059669; color: #fff; border: 0; border-radius: 10px; padding: 14px; font-size: 15px; font-weight: 600; cursor: pointer; }
-    button.pay:hover, button.method:hover { background: #047857; }
-    button.method { margin-bottom: 12px; background: #fff; color: #059669; border: 2px solid #059669; }
-    button.method:hover { background: #ecfdf5; }
-    .ref { margin-top: 14px; font-size: 12px; color: #6b7280; word-break: break-all; }
+    .copy.ok { border-color: var(--brand); color: var(--brand); }
+
+    ol.howto { margin: 16px 0 4px 22px; color: #374151; font-size: 14px; line-height: 1.5; }
+    ol.howto li { margin-bottom: 7px; }
+    ol.howto b { font-weight: 600; }
+
+    /* app walkthrough slideshow */
+    .show-title { font-size: 13px; font-weight: 600; margin: 20px 0 8px; }
+    .show-hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+    .carousel {
+      display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+      gap: 0; border-radius: 16px; background: #0f172a;
+      scrollbar-width: none;
+    }
+    .carousel::-webkit-scrollbar { display: none; }
+    .slide { flex: 0 0 100%; scroll-snap-align: center; display: flex; flex-direction: column; }
+    .slide img { display: block; width: 100%; height: auto; border-radius: 16px; }
+    .slide figcaption {
+      background: linear-gradient(to top, rgba(15,23,42,.92), rgba(15,23,42,.55) 70%, transparent);
+      margin-top: -46px; padding: 30px 14px 10px; border-radius: 0 0 16px 16px;
+      color: #fff; font-size: 13px; text-align: center;
+    }
+    .slide figcaption b {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%; background: var(--brand);
+      color: #fff; font-size: 11px; margin-right: 6px;
+    }
+    .show-nav { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+    .show-nav button.arrow {
+      width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--line);
+      background: #fff; font-size: 17px; color: var(--ink); cursor: pointer; line-height: 1;
+    }
+    .show-nav button.arrow:hover { border-color: var(--brand); color: var(--brand); }
+    .show-nav button.arrow:disabled { opacity: .35; cursor: default; }
+    .dots { display: flex; gap: 6px; }
+    .dots span {
+      width: 7px; height: 7px; border-radius: 50%; background: #d1d5db;
+      transition: background .15s, width .15s; cursor: pointer;
+    }
+    .dots span.on { background: var(--brand); width: 18px; border-radius: 4px; }
+
+    label[for=txref] { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+    input[type=text] {
+      width: 100%; border: 1.5px solid var(--line); border-radius: 12px;
+      padding: 13px 14px; font-size: 16px; font-family: ui-monospace, "Cascadia Mono", monospace;
+    }
+    input[type=text]:focus { outline: none; border-color: var(--brand); }
+    .hint { font-size: 12px; color: var(--muted); margin: 6px 0 14px; }
+
+    button.pay {
+      width: 100%; background: var(--brand); color: #fff; border: 0; border-radius: 12px;
+      padding: 15px; font-size: 16px; font-weight: 700; cursor: pointer;
+    }
+    button.pay:hover { background: #065f46; }
+    button.pay:disabled { opacity: .65; cursor: default; }
+
+    a.change { display: block; text-align: center; font-size: 13px; color: var(--muted); margin-top: 14px; text-decoration: none; }
+    a.change:hover { color: var(--brand); text-decoration: underline; }
+
+    .ref-chip {
+      margin-top: 10px; font-size: 12px; color: var(--muted); word-break: break-all;
+      font-family: ui-monospace, "Cascadia Mono", monospace;
+    }
+    .foot { margin-top: 18px; font-size: 12px; color: #9ca3af; text-align: center; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="merchant">{{ merchant_name }}</div>
-    <h1>{{ reference }}</h1>
-    <div class="amount">{{ amount_display }}</div>
+  <div class="wrap">
+    <div class="steps">
+      <div class="step {% if step == 1 %}on{% endif %} {% if step > 1 %}done{% endif %}"><span class="dot">{% if step > 1 %}&#10003;{% else %}1{% endif %}</span> Method<span class="bar"></span></div>
+      <div class="step {% if step == 2 %}on{% endif %} {% if step > 2 %}done{% endif %}"><span class="dot">{% if step > 2 %}&#10003;{% else %}2{% endif %}</span> Pay<span class="bar"></span></div>
+      <div class="step {% if step == 3 %}on{% endif %}"><span class="dot">3</span> Confirm</div>
+    </div>
 
-    {% match error_message %}{% when Some with (msg) %}<div class="error">{{ msg }}</div>{% when None %}{% endmatch %}
+    <div class="card">
+      <div class="merchant">{{ merchant_name }}</div>
+      <h1>{{ reference }}</h1>
 
-    {% if show_succeeded %}
-      <div class="success">&#9989; Payment successful — thank you!</div>
-      {% match paid_reference %}{% when Some with (r) %}<p class="ref">Transaction reference: {{ r }}</p>{% when None %}{% endmatch %}
-    {% endif %}
-
-    {% if show_expired %}<div class="error">This checkout link has expired. Please start a new order.</div>{% endif %}
-    {% if show_failed %}<div class="error">This payment could not be completed.</div>{% endif %}
-
-    {% if show_methods %}
-      <p class="muted" style="margin-top:0">Choose a payment method</p>
-      {% for m in methods %}
-      <form method="post" action="/c/{{ checkout_id }}/method">
-        <input type="hidden" name="csrf" value="{{ csrf }}" />
-        <input type="hidden" name="method_id" value="{{ m.id }}" />
-        <button class="method" type="submit">{{ m.display_name }}</button>
-      </form>
-      {% endfor %}
-    {% endif %}
-
-    {% if show_instructions %}
-      {% match selected %}{% when Some with (s) %}
-      <p class="muted" style="margin:0 0 4px">Pay with <b>{{ s.display_name }}</b></p>
-      <div class="payto">
-        <div>
-          <div class="muted">Send payment to</div>
-          <b id="acct">{{ s.account_identifier }}</b>
+      {% if has_items %}
+      <div class="items">
+        {% for item in items %}
+        <div class="item">
+          <span class="name">{{ item.name }}</span>
+          <span class="qty">&times;{{ item.quantity }}</span>
+          <span class="unit">@ {{ item.unit_price_display }}</span>
+          <span>{{ item.line_total_display }}</span>
         </div>
-        <button class="copy" type="button" onclick="copyAcct()">Copy</button>
+        {% endfor %}
       </div>
-      <ol>
-        {% for line in s.instruction_lines %}<li>{{ line }}</li>{% endfor %}
-      </ol>
-      <form method="post" action="/c/{{ checkout_id }}/verify">
-        <input type="hidden" name="csrf" value="{{ csrf }}" />
-        <label for="txref">Transaction reference</label>
-        <input type="text" id="txref" name="transaction_reference" placeholder="e.g. FT123456789" required />
-        <button class="pay" type="submit">Verify Payment</button>
-      </form>
-      {% when None %}{% endmatch %}
-    {% endif %}
+      {% endif %}
+      <div class="total">
+        <span>{% if has_items %}Total{% endif %}</span>
+        <span class="amount">{{ amount_display }}</span>
+      </div>
+
+      {% match error_message %}{% when Some with (msg) %}<div class="error">{{ msg }}</div>{% when None %}{% endmatch %}
+
+      {% if show_expired %}<div class="error">This checkout link has expired. Please start a new order with the merchant.</div>{% endif %}
+      {% if show_failed %}<div class="error">This payment could not be completed. Please contact the merchant.</div>{% endif %}
+
+      {% if show_methods %}
+        <p class="choose">Choose a payment method</p>
+        {% for m in methods %}
+        <form method="post" action="/c/{{ checkout_id }}/method">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <input type="hidden" name="method_id" value="{{ m.id }}" />
+          <button class="method" type="submit">
+            <span class="badge">{{ m.display_name.chars().next().unwrap_or('P') }}</span>
+            <span>{{ m.display_name }}<span class="sub">Manual transfer &middot; verified automatically</span></span>
+            <span class="go">&#8250;</span>
+          </button>
+        </form>
+        {% endfor %}
+      {% endif %}
+
+      {% if show_instructions %}
+        {% match selected %}{% when Some with (s) %}
+        <div class="payto">
+          <div class="label">Send exactly {{ amount_display }} to</div>
+          <div class="row">
+            <b id="acct">{{ s.account_identifier }}</b>
+            <button class="copy" type="button" id="copyBtn" onclick="copyAcct()">Copy</button>
+          </div>
+        </div>
+        {% if has_slides %}
+        <p class="show-title">How to pay with {{ s.display_name }}</p>
+        <p class="show-hint">Swipe through the steps &#8592; &#8594;</p>
+        <div class="carousel" id="carousel">
+          {% for slide in slides %}
+          <figure class="slide">
+            <img src="{{ slide.src }}" alt="{{ slide.caption }}" />
+            <figcaption><b>{{ loop.index }}</b>{{ slide.caption }}</figcaption>
+          </figure>
+          {% endfor %}
+        </div>
+        <div class="show-nav">
+          <button type="button" class="arrow" id="slidePrev" aria-label="Previous step">&#8249;</button>
+          <div class="dots" id="slideDots">
+            {% for slide in slides %}<span{% if loop.index == 1 %} class="on"{% endif %}></span>{% endfor %}
+          </div>
+          <button type="button" class="arrow" id="slideNext" aria-label="Next step">&#8250;</button>
+        </div>
+        {% else %}
+        <ol class="howto">
+          {% for line in s.instruction_lines %}<li>{{ line }}</li>{% endfor %}
+        </ol>
+        {% endif %}
+        <form method="post" action="/c/{{ checkout_id }}/verify" class="verify" id="verifyForm">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <label for="txref">Transaction reference</label>
+          <input type="text" id="txref" name="transaction_reference" placeholder="FT123456789" maxlength="64" autocomplete="off" autofocus required />
+          <p class="hint">Find it in your {{ s.display_name }} confirmation. It is not the receipt number.</p>
+          <button class="pay" type="submit" id="verifyBtn">Verify Payment</button>
+        </form>
+        {% if show_change_method %}<a class="change" href="/c/{{ checkout_id }}?change=1">&#8592; Use a different payment method</a>{% endif %}
+        {% when None %}{% endmatch %}
+      {% endif %}
+
+      {% if show_succeeded %}
+      <div class="success">
+        <div class="big"><span class="check">&#10003;</span> Payment successful</div>
+        <p>{{ amount_display }} paid to {{ merchant_name }}. Thank you!</p>
+        {% match paid_reference %}{% when Some with (r) %}<p class="ref-chip">Transaction reference: {{ r }}</p>{% when None %}{% endmatch %}
+      </div>
+      {% endif %}
+    </div>
+
+    <p class="foot">Payments are verified against your wallet's transaction record &mdash; powered by PayBridge</p>
   </div>
+
   <script>
     function copyAcct() {
-      var text = document.getElementById('acct').textContent;
-      if (navigator.clipboard) { navigator.clipboard.writeText(text); }
+      var btn = document.getElementById('copyBtn');
+      var text = document.getElementById('acct').textContent.trim();
+      var done = function () {
+        btn.textContent = 'Copied \u2713';
+        btn.classList.add('ok');
+        setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done);
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    }
+    // Lock the verify button while the form submits so the customer cannot
+    // double-post past the 5 s cooldown.
+    var form = document.getElementById('verifyForm');
+    if (form) {
+      form.addEventListener('submit', function () {
+        var btn = document.getElementById('verifyBtn');
+        btn.disabled = true;
+        btn.textContent = 'Verifying\u2026';
+      });
+    }
+    // App-walkthrough slideshow: native scroll-snap handles touch swipes;
+    // arrows and dots scroll to a slide index, and scrolling updates the dots.
+    var carousel = document.getElementById('carousel');
+    if (carousel) {
+      var slides = carousel.querySelectorAll('.slide');
+      var dots = document.getElementById('slideDots').children;
+      var prev = document.getElementById('slidePrev');
+      var next = document.getElementById('slideNext');
+      var current = 0;
+
+      function show(i) {
+        i = Math.max(0, Math.min(slides.length - 1, i));
+        carousel.scrollTo({ left: i * carousel.clientWidth, behavior: 'smooth' });
+      }
+      function syncDots() {
+        current = Math.round(carousel.scrollLeft / Math.max(1, carousel.clientWidth));
+        for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i === current);
+        prev.disabled = current === 0;
+        next.disabled = current === slides.length - 1;
+      }
+      prev.addEventListener('click', function () { show(current - 1); });
+      next.addEventListener('click', function () { show(current + 1); });
+      for (var i = 0; i < dots.length; i++) {
+        (function (i) { dots[i].addEventListener('click', function () { show(i); }); })(i);
+      }
+      carousel.addEventListener('scroll', function () {
+        window.clearTimeout(carousel._t);
+        carousel._t = window.setTimeout(syncDots, 80);
+      });
+      syncDots();
     }
   </script>
 </body>

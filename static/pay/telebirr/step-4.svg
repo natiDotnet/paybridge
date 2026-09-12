@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 640" font-family="system-ui, 'Segoe UI', sans-serif">
+  <rect width="360" height="640" rx="28" fill="#0f172a"/>
+  <rect x="10" y="10" width="340" height="620" rx="20" fill="#f8fafc"/>
+  <text x="30" y="60" font-size="14" fill="#64748b">9:41</text>
+  <path d="M40 60l-8 14h16z" fill="#0e9f6e"/>
+
+  <text x="180" y="115" font-size="20" fill="#0f172a" text-anchor="middle" font-weight="700">Confirm payment</text>
+
+  <rect x="30" y="145" width="300" height="180" rx="14" fill="#fff" stroke="#e2e8f0"/>
+  <text x="52" y="182" font-size="13" fill="#64748b">Send to</text>
+  <text x="308" y="182" font-size="15" fill="#0f172a" text-anchor="end" font-family="ui-monospace, monospace">+251 90 000 0000</text>
+  <line x1="52" y1="200" x2="308" y2="200" stroke="#f1f5f9"/>
+  <text x="52" y="232" font-size="13" fill="#64748b">Amount</text>
+  <text x="308" y="232" font-size="15" fill="#0f172a" text-anchor="end" font-weight="700">500.00 ETB</text>
+  <line x1="52" y1="250" x2="308" y2="250" stroke="#f1f5f9"/>
+  <text x="52" y="282" font-size="13" fill="#64748b">Fee</text>
+  <text x="308" y="282" font-size="15" fill="#0e9f6e" text-anchor="end">Free</text>
+  <line x1="52" y1="300" x2="308" y2="300" stroke="#f1f5f9"/>
+  <text x="52" y="322" font-size="13" fill="#64748b">Total</text>
+  <text x="308" y="322" font-size="16" fill="#0f172a" text-anchor="end" font-weight="700">500.00 ETB</text>
+
+  <rect x="30" y="355" width="300" height="56" rx="12" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="52" y="389" font-size="15" fill="#0f172a">Payment PIN ••••</text>
+  <g>
+    <circle cx="270" cy="383" r="5" fill="#0f172a"/><circle cx="288" cy="383" r="5" fill="#0f172a"/>
+    <circle cx="306" cy="383" r="5" fill="#0f172a"/><circle cx="324" cy="383" r="5" fill="#0f172a"/>
+  </g>
+
+  <rect x="30" y="450" width="300" height="56" rx="14" fill="#0e9f6e"/>
+  <text x="180" y="485" font-size="17" fill="#fff" text-anchor="middle" font-weight="700">Confirm &amp; Pay</text>
+
+  <rect x="30" y="560" width="300" height="30" rx="8" fill="#fef9c3" opacity="0.8"/>
+  <text x="180" y="580" font-size="13" fill="#854d0e" text-anchor="middle">④ Check the amount, then confirm</text>
+</svg>

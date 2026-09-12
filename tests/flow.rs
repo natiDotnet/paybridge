@@ -61,6 +61,7 @@ async fn full_checkout_flow() {
         verify_cooldown: Duration::ZERO,
         webhook_schedule: vec![Duration::ZERO, Duration::ZERO],
         worker_poll_interval: Duration::from_secs(1),
+        static_dir: std::path::PathBuf::from("static"),
     });
     let state = AppState {
         pool,

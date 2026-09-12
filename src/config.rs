@@ -24,6 +24,8 @@ pub struct Config {
     /// Delay before retry attempt N+1 (index 0 = delay before attempt 2).
     pub webhook_schedule: Vec<Duration>,
     pub worker_poll_interval: Duration,
+    /// Directory with static assets (payment-app walkthrough slides etc.).
+    pub static_dir: std::path::PathBuf,
 }
 
 impl Config {
@@ -57,6 +59,9 @@ impl Config {
                 "0s,30s,2m,10m,45m,2h,6h,24h",
             ),
             worker_poll_interval: duration_env("WORKER_POLL_INTERVAL", Duration::from_secs(5)),
+            static_dir: std::path::PathBuf::from(
+                get("PAYBRIDGE_STATIC_DIR").unwrap_or_else(|| "static".into()),
+            ),
         }
     }
 }

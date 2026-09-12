@@ -23,6 +23,7 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["axum_extras"] }
+tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 640" font-family="system-ui, 'Segoe UI', sans-serif">
+  <rect width="360" height="640" rx="28" fill="#0f172a"/>
+  <rect x="10" y="10" width="340" height="620" rx="20" fill="#f8fafc"/>
+  <rect x="150" y="18" width="60" height="10" rx="5" fill="#0f172a"/>
+  <text x="30" y="60" font-size="14" fill="#64748b">9:41</text>
+  <text x="300" y="60" font-size="14" fill="#64748b">LTE ▮</text>
+
+  <circle cx="180" cy="105" r="26" fill="#0e9f6e"/>
+  <text x="180" y="113" font-size="20" fill="#fff" text-anchor="middle" font-weight="700">T</text>
+  <text x="180" y="155" font-size="20" fill="#0f172a" text-anchor="middle" font-weight="700">Telebirr</text>
+
+  <rect x="30" y="180" width="300" height="86" rx="14" fill="#0e9f6e"/>
+  <text x="48" y="212" font-size="13" fill="#d1fae5">Available balance</text>
+  <text x="48" y="244" font-size="24" fill="#fff" font-weight="700">1,240.50 ETB</text>
+
+  <text x="30" y="300" font-size="14" fill="#64748b">Services</text>
+  <g font-size="12" fill="#334155" text-anchor="middle">
+    <g>
+      <rect x="30" y="315" width="66" height="66" rx="12" fill="#ecfdf5"/>
+      <text x="63" y="340" font-size="20">➕</text>
+      <text x="63" y="368">Top up</text>
+    </g>
+    <g>
+      <rect x="108" y="315" width="66" height="66" rx="12" fill="#ecfdf5"/>
+      <text x="141" y="340" font-size="20">📶</text>
+      <text x="141" y="368">Airtime</text>
+    </g>
+    <g>
+      <rect x="186" y="315" width="66" height="66" rx="12" fill="#ecfdf5"/>
+      <text x="219" y="340" font-size="20">🧾</text>
+      <text x="219" y="368">Bills</text>
+    </g>
+    <g>
+      <rect x="264" y="315" width="66" height="66" rx="12" fill="#ecfdf5"/>
+      <text x="297" y="340" font-size="20">📋</text>
+      <text x="297" y="368">My QR</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="30" y="400" width="300" height="66" rx="12" fill="#fff" stroke="#0e9f6e" stroke-width="3"/>
+    <circle cx="63" cy="433" r="18" fill="#0e9f6e"/>
+    <text x="63" y="440" font-size="16" text-anchor="middle" fill="#fff">↗</text>
+    <text x="95" y="440" font-size="16" fill="#0f172a" font-weight="700">Send Money</text>
+  </g>
+  <g font-size="12" fill="#94a3b8" text-anchor="middle">
+    <rect x="30" y="490" width="300" height="60" rx="12" fill="#f1f5f9"/>
+    <text x="180" y="516">Scan QR</text>
+    <text x="180" y="536">Receive money</text>
+  </g>
+  <text x="180" y="600" font-size="13" fill="#94a3b8" text-anchor="middle">① Open the app</text>
+</svg>

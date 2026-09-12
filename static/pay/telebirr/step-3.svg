@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 640" font-family="system-ui, 'Segoe UI', sans-serif">
+  <rect width="360" height="640" rx="28" fill="#0f172a"/>
+  <rect x="10" y="10" width="340" height="620" rx="20" fill="#f8fafc"/>
+  <text x="30" y="60" font-size="14" fill="#64748b">9:41</text>
+  <path d="M40 60l-8 14h16z" fill="#0e9f6e"/>
+
+  <text x="180" y="120" font-size="14" fill="#64748b" text-anchor="middle">To</text>
+  <text x="180" y="150" font-size="20" fill="#0f172a" text-anchor="middle" font-weight="700" font-family="ui-monospace, monospace">+251 90 000 0000</text>
+
+  <text x="180" y="230" font-size="44" fill="#0f172a" text-anchor="middle" font-weight="700" font-family="ui-monospace, monospace">500.00</text>
+  <text x="180" y="262" font-size="16" fill="#64748b" text-anchor="middle">ETB</text>
+
+  <g font-size="20" fill="#0f172a" text-anchor="middle" font-weight="600">
+    <g>
+      <rect x="30" y="300" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="75" y="335">1</text>
+    </g>
+    <g>
+      <rect x="135" y="300" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="180" y="335">2</text>
+    </g>
+    <g>
+      <rect x="240" y="300" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="285" y="335">3</text>
+    </g>
+    <g>
+      <rect x="30" y="366" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="75" y="401">4</text>
+    </g>
+    <g>
+      <rect x="135" y="366" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="180" y="401">5</text>
+    </g>
+    <g>
+      <rect x="240" y="366" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="285" y="401">6</text>
+    </g>
+    <g>
+      <rect x="30" y="432" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="75" y="467">7</text>
+    </g>
+    <g>
+      <rect x="135" y="432" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="180" y="467">8</text>
+    </g>
+    <g>
+      <rect x="240" y="432" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="285" y="467">9</text>
+    </g>
+    <g>
+      <rect x="30" y="498" width="90" height="54" rx="10" fill="#f1f5f9"/>
+      <text x="75" y="533" font-size="16">.</text>
+    </g>
+    <g>
+      <rect x="135" y="498" width="90" height="54" rx="10" fill="#fff" stroke="#e2e8f0"/>
+      <text x="180" y="533">0</text>
+    </g>
+    <g>
+      <rect x="240" y="498" width="90" height="54" rx="10" fill="#ecfdf5"/>
+      <text x="285" y="533" font-size="14">⌫</text>
+    </g>
+  </g>
+
+  <rect x="30" y="570" width="300" height="34" rx="8" fill="#fef9c3" opacity="0.8"/>
+  <text x="180" y="592" font-size="13" fill="#854d0e" text-anchor="middle">③ Type the exact amount of this checkout</text>
+</svg>

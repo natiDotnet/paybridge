@@ -65,15 +65,35 @@ pub struct CheckoutPage {
     pub amount_display: String,
     pub checkout_id: String,
     pub csrf: String,
+    /// 1 = choose method, 2 = pay + verify, 3 = done.
+    pub step: u8,
     pub show_methods: bool,
     pub show_instructions: bool,
     pub show_succeeded: bool,
     pub show_expired: bool,
     pub show_failed: bool,
+    pub show_change_method: bool,
+    pub items: Vec<ItemView>,
+    pub has_items: bool,
+    pub slides: Vec<SlideView>,
+    pub has_slides: bool,
     pub methods: Vec<MethodView>,
     pub selected: Option<MethodView>,
     pub error_message: Option<String>,
     pub paid_reference: Option<String>,
+}
+
+pub struct ItemView {
+    pub name: String,
+    pub quantity: i64,
+    pub unit_price_display: String,
+    pub line_total_display: String,
+}
+
+/// One walkthrough image ("how to pay in the app") for the selected provider.
+pub struct SlideView {
+    pub src: String,
+    pub caption: String,
 }
 
 pub struct MethodView {
@@ -81,6 +101,46 @@ pub struct MethodView {
     pub display_name: String,
     pub account_identifier: String,
     pub instruction_lines: Vec<String>,
+}
+
+/// Load `static/pay/{provider}/slides.json` — a list of
+/// `{ "image": "...", "caption": "..." }` entries shown as the "how to pay in
+/// the app" slideshow. Missing manifest or files -> no slideshow (the plain
+/// numbered steps are shown instead), so merchants can add screenshots later
+/// without code changes.
+fn load_slides(static_dir: &std::path::Path, provider: &str) -> Vec<SlideView> {
+    #[derive(Deserialize)]
+    struct SlideEntry {
+        image: String,
+        caption: String,
+    }
+
+    // Provider comes from a CHECK constraint in the DB; still, never let it
+    // escape the slides directory.
+    if !provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Vec::new();
+    }
+    let dir = static_dir.join("pay").join(provider);
+    let Ok(raw) = std::fs::read_to_string(dir.join("slides.json")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<SlideEntry>>(&raw) else {
+        tracing::warn!(provider, "invalid slides.json; skipping slideshow");
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter(|e| {
+            !e.image.is_empty()
+                && e.image.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                && !e.image.contains("..")
+                && dir.join(&e.image).is_file()
+        })
+        .map(|e| SlideView {
+            src: format!("/static/pay/{provider}/{}", e.image),
+            caption: e.caption,
+        })
+        .collect()
 }
 
 fn error_text(reason: &str, amount_display: &str) -> String {
@@ -143,10 +203,33 @@ pub async fn checkout_page(
 
     let amount_display = format!("{} {}", format_minor(checkout.amount_minor), checkout.currency);
 
+    let item_rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT name, quantity, unit_price_minor FROM checkout_items WHERE checkout_id = ? ORDER BY id",
+    )
+    .bind(&checkout.id)
+    .fetch_all(&state.pool)
+    .await;
+    let items = match item_rows {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(name, quantity, unit_price)| ItemView {
+                name,
+                quantity,
+                unit_price_display: format_minor(unit_price),
+                line_total_display: format_minor(unit_price * quantity),
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => return db_error_page(e),
+    };
+    let has_items = !items.is_empty();
+
+    // `?change=1` re-opens method selection on a pending checkout.
+    let wants_change = params.contains_key("change");
     let needs_methods =
         checkout.status == "created" || (checkout.status == "pending" && checkout.selected_method_id.is_none());
+    let show_methods = needs_methods || (wants_change && checkout.status == "pending");
     let mut methods = Vec::new();
-    if needs_methods {
+    if show_methods {
         match sqlx::query_as::<_, (String, String)>(
             "SELECT id, display_name FROM merchant_payment_methods \
              WHERE merchant_id = ? AND status = 'active' ORDER BY created_at",
@@ -171,8 +254,10 @@ pub async fn checkout_page(
     }
 
     let mut selected = None;
+    let mut slides = Vec::new();
     if let Some(method_id) = &checkout.selected_method_id {
         if let Ok(Some(m)) = domain::load_method(&state.pool, method_id).await {
+            slides = load_slides(&state.config.static_dir, &m.provider);
             selected = Some(MethodView {
                 id: m.id,
                 display_name: m.display_name,
@@ -181,6 +266,7 @@ pub async fn checkout_page(
             });
         }
     }
+    let has_slides = !slides.is_empty();
 
     let paid_reference = if checkout.status == "succeeded" {
         sqlx::query_as::<_, (String,)>(
@@ -201,17 +287,33 @@ pub async fn checkout_page(
 
     let error_message = params.get("error").map(|reason| error_text(reason, &amount_display));
 
+    let step: u8 = if checkout.status == "succeeded" {
+        3
+    } else if checkout.status == "pending" && selected.is_some() && !wants_change {
+        2
+    } else {
+        1
+    };
+    let show_instructions = checkout.status == "pending" && selected.is_some() && !show_methods;
+    let show_change_method = show_instructions && !wants_change;
+
     let page = CheckoutPage {
         merchant_name,
         reference: checkout.reference.clone(),
         amount_display,
         checkout_id: checkout.id.clone(),
         csrf: csrf.clone(),
-        show_methods: needs_methods,
-        show_instructions: checkout.status == "pending" && selected.is_some(),
+        step,
+        show_methods,
+        show_instructions,
         show_succeeded: checkout.status == "succeeded",
         show_expired: checkout.status == "expired",
         show_failed: checkout.status == "failed",
+        show_change_method,
+        items,
+        has_items,
+        slides,
+        has_slides,
         methods,
         selected,
         error_message,
