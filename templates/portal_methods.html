@@ -1,0 +1,65 @@
+{% extends "portal_base.html" %}
+{% block title %}Payment methods{% endblock %}
+{% block content %}
+<h1>Payment methods</h1>
+
+<p class="section-label">Your receiving accounts</p>
+<div class="card">
+  {% if methods.is_empty() %}
+  <p class="empty">No payment methods yet — add one below so customers can pay you.</p>
+  {% else %}
+  <table>
+    <tr><th>Provider</th><th>Display name</th><th>Receiving account</th><th>Status</th><th></th></tr>
+    {% for m in methods %}
+    <tr>
+      <td>{{ m.provider }}<br /><span class="id">{{ m.method_id }}</span></td>
+      <td>{{ m.display_name }}</td>
+      <td>
+        <form class="inline" method="post" action="/portal/methods/{{ m.method_id }}/account">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <input type="text" name="account_identifier" value="{{ m.account_identifier }}"
+                 style="border:1.5px solid var(--line);border-radius:9px;padding:7px 9px;font-size:13px;width:160px;font-family:ui-monospace,'Cascadia Mono',monospace" />
+          <button class="act" type="submit">Save</button>
+        </form>
+      </td>
+      <td><span class="st st-{{ m.status }}">{{ m.status }}</span></td>
+      <td>
+        <form class="inline" method="post" action="/portal/methods/{{ m.method_id }}/status">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <input type="hidden" name="action" value="{% if m.status == "active" %}disable{% else %}enable{% endif %}" />
+          <button class="act {% if m.status == "active" %}danger{% endif %}" type="submit">
+            {% if m.status == "active" %}Disable{% else %}Enable{% endif %}
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  <p class="empty">The customer steps for each provider are managed centrally by PayBridge —
+  they always match the provider's current app.</p>
+</div>
+
+<p class="section-label">Add a payment method</p>
+<div class="card">
+  <form method="post" action="/portal/methods">
+    <input type="hidden" name="csrf" value="{{ csrf }}" />
+    <div class="filters" style="align-items: end;">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600">Provider
+        <select name="provider" style="display:block;margin-top:4px;border:1.5px solid var(--line);border-radius:9px;padding:9px 12px;font-size:14px;">
+          {% for p in providers %}<option value="{{ p.0 }}">{{ p.1 }}</option>{% endfor %}
+        </select>
+      </label>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600">Display name
+        <input type="text" name="display_name" placeholder="defaults to the provider name"
+               style="display:block;margin-top:4px;border:1.5px solid var(--line);border-radius:9px;padding:9px 12px;font-size:14px;width:200px;" />
+      </label>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600">Your receiving account
+        <input type="text" name="account_identifier" placeholder="+2519XXXXXXXX" required
+               style="display:block;margin-top:4px;border:1.5px solid var(--line);border-radius:9px;padding:9px 12px;font-size:14px;width:200px;" />
+      </label>
+      <button class="act primary" type="submit">Add method</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

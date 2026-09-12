@@ -261,6 +261,12 @@ async fn seed(pool: &SqlitePool, endpoint_url: &str) {
         .execute(pool)
         .await
         .unwrap();
+    // Starting verification credit so checkout creation passes the prepaid gate.
+    sqlx::query("UPDATE merchants SET credit_balance = 1000 WHERE id = ?")
+        .bind(MERCHANT)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) VALUES ('key_test', ?, ?, ?, ?)",
     )

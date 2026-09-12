@@ -187,6 +187,12 @@ async fn seed(pool: &SqlitePool) {
         .execute(pool)
         .await
         .unwrap();
+    // Starting verification credit so the merchant API passes the prepaid gate.
+    sqlx::query("UPDATE merchants SET credit_balance = 1000 WHERE id = ?")
+        .bind(MERCHANT)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) \
          VALUES ('key_admin_test', ?, ?, ?, ?)",
@@ -285,6 +291,20 @@ fn post(path: &str, body: &str, content_type: &str, token: Option<&str>) -> Requ
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
+/// Generic request builder (merchant API calls in the credits test).
+fn request(
+    method: &str,
+    uri: &str,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    builder.body(Body::from(body.unwrap_or_default())).unwrap()
+}
+
 /// Merchant-API call used to prove suspension enforcement.
 async fn merchant_call(app: &Router) -> (StatusCode, String, HeaderMap) {
     merchant_call_with(app, API_KEY).await
@@ -309,6 +329,12 @@ async fn call(app: &Router, req: Request<Body>) -> (StatusCode, String, HeaderMa
         .await
         .unwrap();
     (status, String::from_utf8_lossy(&bytes).to_string(), headers)
+}
+
+/// JSON-API variant for merchant-facing endpoints.
+async fn call_json(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let (status, body, _) = call(app, req).await;
+    (status, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
 }
 
 /// Shared app + database: migrations, seeded merchant/key/method/endpoint,
@@ -624,7 +650,7 @@ async fn signup_approval_and_roles() {
 
     let (status, body, _) = call(&app, get("/portal", Some(&owner_cookie))).await;
     assert_eq!(status, StatusCode::OK, "portal renders");
-    assert!(body.contains("Fresh Shop") && body.contains("pending approval"), "{body}");
+    assert!(body.contains("Fresh Shop") && body.contains("pending activation"), "{body}");
 
     // Merchant users are bounced away from /admin.
     let (status, _, headers) = call(&app, get("/admin", Some(&owner_cookie))).await;
@@ -712,4 +738,479 @@ async fn signup_approval_and_roles() {
     let (status, body, _) = call(&app, get("/admin/users", Some(&admin_cookie))).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("dev@paybridge.test"));
+}
+
+#[tokio::test]
+async fn credits_flow() {
+    let (app, pool, _tmp) = setup().await;
+    let (admin_cookie, admin_csrf) = login(&app).await;
+
+    // --- 1. merchant signs up: pending, zero credit ------------------------------
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/signup",
+            "merchant_name=Credit Shop&name=Owner&email=owner@credit.test&password=sup3rsecret1",
+            "application/x-www-form-urlencoded",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let (merchant_id,): (String,) = sqlx::query_as(
+        "SELECT id FROM merchants WHERE name = 'Credit Shop'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (credits, onboarding): (i64, String) = sqlx::query_as(
+        "SELECT credit_balance, onboarding_status FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((credits, onboarding.as_str()), (0, "pending"));
+
+    // --- 2. owner signs in and buys a 200-credit package --------------------------
+    let (_, _, headers) = call(
+        &app,
+        post(
+            "/admin/login",
+            "email=owner@credit.test&password=sup3rsecret1",
+            "application/x-www-form-urlencoded",
+            None,
+        ),
+    )
+    .await;
+    let owner_cookie =
+        headers["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let owner_csrf =
+        owner_cookie.split_once('=').unwrap().1.split_once('.').unwrap().1.to_string();
+
+    let (status, body, buy_headers) = call(
+        &app,
+        post(
+            "/portal/credits/buy",
+            &format!("csrf={owner_csrf}&credits=200"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "buy redirects to the hosted checkout: {body}");
+    let purchase_checkout = buy_headers["location"]
+        .to_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(purchase_checkout.starts_with("chk_"), "location was: {}", buy_headers["location"].to_str().unwrap());
+    let (in_db,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM checkouts WHERE id = ?",
+    )
+    .bind(&purchase_checkout)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(in_db, 1, "credit checkout must exist");
+
+    // --- 3. the purchase checkout is verified like any payment --------------------
+    // (select the platform's Telebirr method, then verify a mock reference)
+    sqlx::query(
+        "UPDATE checkouts SET selected_method_id = 'mpm_seed_pb_telebirr', status = 'pending' \
+         WHERE id = ?",
+    )
+    .bind(&purchase_checkout)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v1/checkouts/{purchase_checkout}/verify"),
+            vec![("content-type".to_string(), "application/json".to_string())],
+            Some(r#"{"transactionReference":"FT-CREDITS-1"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "purchase verify: {body}");
+
+    let (credits, onboarding): (i64, String) = sqlx::query_as(
+        "SELECT credit_balance, onboarding_status FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((credits, onboarding.as_str()), (200, "approved"), "purchase settled instantly");
+
+    let (ledger_rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM credit_ledger WHERE merchant_id = ? AND reason = 'purchase' AND delta = 200",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger_rows, 1);
+
+    // --- 4. with credit, the merchant self-generates an API key --------------------
+    let (status, body, _) = call(
+        &app,
+        post(
+            "/portal/keys/generate",
+            &format!("csrf={owner_csrf}"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "key generate: {body}");
+    let secret = extract_new_secret(&body);
+    assert!(secret.starts_with("pb_sk_test_"));
+
+    // --- 5. a successful verification consumes exactly one credit ------------------
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            "/api/v1/checkouts",
+            vec![
+                ("authorization".to_string(), format!("Bearer {secret}")),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            Some(r#"{"reference":"ORDER-C1","amount":100,"currency":"ETB"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create with credit: {body}");
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let own_checkout = created["checkoutId"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE checkouts SET selected_method_id = 'mpm_admin_test', status = 'pending' WHERE id = ?",
+    )
+    .bind(&own_checkout)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v1/checkouts/{own_checkout}/verify"),
+            vec![("content-type".to_string(), "application/json".to_string())],
+            Some(r#"{"transactionReference":"FT-OWN-1"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "own verify: {body}");
+
+    let (credits,): (i64,) = sqlx::query_as(
+        "SELECT credit_balance FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(credits, 199, "one credit consumed by the successful verification");
+
+    // A second checkout, created while credit is still available.
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            "/api/v1/checkouts",
+            vec![
+                ("authorization".to_string(), format!("Bearer {secret}")),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            Some(r#"{"reference":"ORDER-C2","amount":100,"currency":"ETB"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "second create: {body}");
+    let created2: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let pending_checkout = created2["checkoutId"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE checkouts SET selected_method_id = 'mpm_admin_test', status = 'pending' WHERE id = ?",
+    )
+    .bind(&pending_checkout)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // --- 6. at zero credit, checkout creation is 402 and verification refuses ------
+    sqlx::query("UPDATE merchants SET credit_balance = 0 WHERE id = ?")
+        .bind(&merchant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            "/api/v1/checkouts",
+            vec![
+                ("authorization".to_string(), format!("Bearer {secret}")),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            Some(r#"{"reference":"ORDER-C3","amount":100,"currency":"ETB"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "create at zero credits: {body}");
+    let err: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(err["error"], "insufficient_credits");
+
+    let (status, body, _) = call(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v1/checkouts/{pending_checkout}/verify"),
+            vec![("content-type".to_string(), "application/json".to_string())],
+            Some(r#"{"transactionReference":"FT-OWN-2"}"#.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "verify at zero credits: {body}");
+    let err: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(err["error"], "insufficient_credits");
+
+    // --- 7. admin grant tops the balance back up (audited) --------------------------
+    let (status, _, _) = call(
+        &app,
+        post(
+            &format!("/admin/merchants/{merchant_id}/credits"),
+            &format!("csrf={admin_csrf}&amount=50"),
+            "application/x-www-form-urlencoded",
+            Some(&admin_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (credits,): (i64,) = sqlx::query_as(
+        "SELECT credit_balance FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(credits, 50);
+    let (rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'credits.granted'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn portal_scoping() {
+    let (app, pool, _tmp) = setup().await;
+    let (admin_cookie, admin_csrf) = login(&app).await;
+
+    // A merchant-role user for the seeded test merchant.
+    let (status, body, _) = call(
+        &app,
+        post(
+            "/admin/users",
+            &format!(
+                "csrf={admin_csrf}&email=merchant@acme.test&name=Acme Owner&role=merchant&password=merchpass1&merchant_id={MERCHANT}"
+            ),
+            "application/x-www-form-urlencoded",
+            Some(&admin_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "create merchant user: {body}");
+
+    let (status, _, headers) = call(
+        &app,
+        post(
+            "/admin/login",
+            "email=merchant@acme.test&password=merchpass1",
+            "application/x-www-form-urlencoded",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(headers["location"], "/portal");
+    let owner_cookie =
+        headers["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+
+    // Own checkout: visible.
+    let (status, body, _) = call(
+        &app,
+        get(&format!("/portal/checkouts/{CHECKOUT}"), Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "own checkout detail");
+    assert!(body.contains("ORDER-77"));
+
+    // Another merchant's checkout: 404, and absent from every list.
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO merchants (id, name, status, created_at) VALUES ('mch_other', 'Other Shop', 'active', ?)",
+    )
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO checkouts \
+         (id, merchant_id, reference, amount_minor, currency, status, expires_at, created_at, updated_at) \
+         VALUES ('chk_other', 'mch_other', 'ORDER-OTHER', 9900, 'ETB', 'pending', '2027-01-01T00:00:00Z', ?, ?)",
+    )
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, _, _) = call(
+        &app,
+        get("/portal/checkouts/chk_other", Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "other merchant's checkout is 404");
+
+    let (status, body, _) = call(
+        &app,
+        get("/portal/checkouts?q=ORDER-OTHER", Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("chk_other"), "list must not leak other merchants");
+
+    // Webhooks: sees own delivery, can retry it.
+    let (status, body, _) = call(&app, get("/portal/webhooks", Some(&owner_cookie))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("whd_admin_test"), "own delivery listed: {body}");
+
+    let (status, body, _) = call(
+        &app,
+        get("/portal/webhooks/deliveries/whd_admin_test", Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "own delivery detail: {body}");
+
+    let (pending_before,): (String,) = sqlx::query_as(
+        "SELECT status FROM outbox_messages WHERE id = ?",
+    )
+    .bind(EVENT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_before, "dead");
+
+    let owner_csrf =
+        owner_cookie.split_once('=').unwrap().1.split_once('.').unwrap().1.to_string();
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/webhooks/deliveries/whd_admin_test/retry",
+            &format!("csrf={owner_csrf}"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "merchant retries own delivery");
+
+    let (event_status,): (String,) = sqlx::query_as(
+        "SELECT status FROM outbox_messages WHERE id = ?",
+    )
+    .bind(EVENT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event_status, "pending", "retry re-queued the merchant's event");
+
+    // (csrf was the admin's on purpose: wrong csrf must fail)
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/webhooks/deliveries/whd_admin_test/retry",
+            "csrf=wrong",
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // --- merchant adds own payment method: steps come from platform config --------
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/methods",
+            &format!("csrf={owner_csrf}&provider=cbebirr&display_name=&account_identifier=10001112222"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "portal method create");
+
+    let (instructions, method_status): (String, String) = sqlx::query_as(
+        "SELECT instructions, status FROM merchant_payment_methods \
+         WHERE merchant_id = ? AND provider = 'cbebirr'",
+    )
+    .bind(MERCHANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(method_status, "active");
+    assert!(instructions.contains("CBE Birr app"), "steps from platform config: {instructions}");
+
+    // Admin edits the steps; merchant cannot.
+    let (method_id,): (String,) = sqlx::query_as(
+        "SELECT id FROM merchant_payment_methods WHERE merchant_id = ? AND provider = 'cbebirr'",
+    )
+    .bind(MERCHANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (status, _, _) = call(
+        &app,
+        post(
+            &format!("/admin/merchants/{MERCHANT}/methods/{method_id}/instructions"),
+            &format!("csrf={admin_csrf}&instructions=Step one%0AStep two"),
+            "application/x-www-form-urlencoded",
+            Some(&admin_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "admin edits steps");
+    let (instructions,): (String,) = sqlx::query_as(
+        "SELECT instructions FROM merchant_payment_methods WHERE id = ?",
+    )
+    .bind(&method_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(instructions, "Step one\nStep two");
+
+    // Merchant-role users never reach /admin at all — the gate bounces them
+    // back to /portal, so the steps editor is unreachable by construction.
+    let (status, _, headers) = call(
+        &app,
+        post(
+            &format!("/admin/merchants/{MERCHANT}/methods/{method_id}/instructions"),
+            &format!("csrf={owner_csrf}&instructions=hijack"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(headers["location"], "/portal", "merchant bounced out of /admin");
 }

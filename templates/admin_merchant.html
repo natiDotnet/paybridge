@@ -10,9 +10,16 @@
 <div class="card">
   <div class="dl">
     <dt>Merchant ID</dt><dd class="id">{{ merchant_id }}</dd>
+    <dt>Credit balance</dt><dd><b>{{ credits }}</b> <span style="color:var(--muted);font-size:12.5px">(1 credit per successful verification)</span></dd>
     <dt>Created</dt><dd>{{ created_at }}</dd>
   </div>
   <p style="margin-top:14px">
+    <form class="inline" method="post" action="/admin/merchants/{{ merchant_id }}/credits">
+      <input type="hidden" name="csrf" value="{{ csrf }}" />
+      <input type="number" name="amount" min="1" max="1000000" placeholder="credits" required
+             style="border:1.5px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13.5px;width:110px" />
+      <button class="act" type="submit">Grant credit</button>
+    </form>
     {% if onboarding != "approved" %}
     <form class="inline" method="post" action="/admin/merchants/{{ merchant_id }}/approve">
       <input type="hidden" name="csrf" value="{{ csrf }}" />
@@ -41,7 +48,7 @@
   <p class="empty">No payment methods configured.</p>
   {% else %}
   <table>
-    <tr><th>Provider</th><th>Display name</th><th>Receiving account</th><th>Status</th><th></th></tr>
+    <tr><th>Provider</th><th>Display name</th><th>Receiving account</th><th>Customer steps</th><th>Status</th><th></th></tr>
     {% for m in methods %}
     <tr>
       <td>{{ m.provider }}<br /><span class="id">{{ m.method_id }}</span></td>
@@ -51,6 +58,14 @@
           <input type="hidden" name="csrf" value="{{ csrf }}" />
           <input type="text" name="account_identifier" value="{{ m.account_identifier }}" />
           <button class="act" type="submit">Save</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/admin/merchants/{{ merchant_id }}/methods/{{ m.method_id }}/instructions">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <textarea name="instructions" rows="3"
+            style="width: 260px; border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; font-family: inherit;">{{ m.instructions }}</textarea>
+          <button class="act" type="submit">Save steps</button>
         </form>
       </td>
       <td><span class="st st-{{ m.status }}">{{ m.status }}</span></td>
@@ -83,7 +98,7 @@
       </label>
     </div>
     <label>Customer instructions (one step per line)
-      <textarea name="instructions" rows="3" placeholder="Leave empty for the standard steps"></textarea>
+      <textarea name="instructions" rows="3" placeholder="Leave empty for the standard steps from platform config"></textarea>
     </label>
     <p><button class="act" type="submit">Add method</button></p>
   </form>

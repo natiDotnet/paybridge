@@ -90,12 +90,26 @@ development). Passwords are stored as PBKDF2-SHA256 hashes; sessions are
 HMAC cookies bound to the password hash, so changing or disabling a user kills
 their sessions.
 
-**Merchant signup** at [/signup](http://localhost:4000/signup): creates a
-`pending` merchant plus its owner user (role `merchant`). Pending merchants
-fail API-key authentication; a superadmin approves them from the merchant
-detail page. Merchant-role users sign into a minimal portal at
-[`/portal`](http://localhost:4000/portal) showing their approval status, their
-own checkouts, and their API key prefixes — scoped strictly to their merchant.
+**Merchant signup** at [/signup](http://localhost:4000/signup): creates the
+merchant plus its owner user (role `merchant`), who signs into a portal at
+[`/portal`](http://localhost:4000/portal) — the full ops toolkit scoped
+strictly to their own merchant: dashboard (today's payments/volume/credits),
+checkout search + detail (verify attempts, webhook events), their webhook
+deliveries with retry, **payment-method self-service** (add a provider +
+receiving account; the customer steps come from central `provider_instructions`
+config that only admins edit, per method), self-serve API keys
+(generate/rotate/revoke), and the credit balance + history with the
+buy-credit flow. `/admin` redirects merchant users there.
+
+**Prepaid verification credit** — there is no manual account approval.
+Merchants activate and pay for the verification API with credit
+(1 ETB = 1 credit): they buy a package (100/200/500 ETB) in the portal, pay it
+on a hosted checkout to the platform wallet (`PayBridge Credits`), and the
+credit lands the moment that payment verifies — atomically with the checkout
+success. Each **successful verification consumes 1 credit**; at zero, checkout
+creation returns `402 insufficient_credits` and verification refuses until
+they top up. Every movement is recorded in `credit_ledger`; admins can grant
+credit manually (audited) on the merchant page.
 
 **Roles** (enforced server-side; admin actions are audited with the acting
 user): `superadmin` (full, incl. user management at `/admin/users` and merchant

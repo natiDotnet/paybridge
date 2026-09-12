@@ -1,0 +1,62 @@
+{% extends "portal_base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>{{ merchant_name }}
+  <span class="st {% if onboarding == "approved" %}st-active{% else %}st-pending{% endif %}">
+    {% if onboarding == "approved" %}active{% else %}pending activation{% endif %}
+  </span>
+</h1>
+
+{% if onboarding != "approved" %}
+<div class="banner warn">Your account is not active yet. <a href="/portal/credits">Buy verification
+credit</a> to activate it &mdash; your API key works as soon as you have credit.</div>
+{% endif %}
+
+<div class="stats">
+  <div class="stat"><span class="label">Today's payments</span><b>{{ today_total }}</b></div>
+  <div class="stat"><span class="label">Successful today</span><b>{{ today_succeeded }}</b></div>
+  <div class="stat"><span class="label">Failed today</span><b>{{ today_failed }}</b></div>
+  <div class="stat"><span class="label">ETB volume today</span><b>{{ volume_display }}</b></div>
+  <div class="stat"><span class="label">Pending (open)</span><b>{{ pending }}</b></div>
+  <div class="stat"><span class="label">Credit balance</span><b>{{ credits }}</b></div>
+</div>
+
+<div class="card">
+  <h2>Recent payments</h2>
+  {% if recent.is_empty() %}
+  <p class="empty">No checkouts yet. Create one from your integration — see the <a href="/docs">API reference</a>.</p>
+  {% else %}
+  <table>
+    <tr><th>Reference</th><th class="num">Amount</th><th>Status</th><th>Created</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td><a href="/portal/checkouts/{{ r.checkout_id }}">{{ r.reference }}</a><br /><span class="id">{{ r.checkout_id }}</span></td>
+      <td class="num">{{ r.amount_display }}</td>
+      <td><span class="st st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Payment methods</h2>
+  {% if methods.is_empty() %}
+  <p class="empty">No payment methods yet — the PayBridge team configures your receiving accounts.</p>
+  {% else %}
+  <table>
+    <tr><th>Provider</th><th>Display name</th><th>Receiving account</th><th>Status</th></tr>
+    {% for m in methods %}
+    <tr>
+      <td>{{ m.provider }}</td>
+      <td>{{ m.display_name }}</td>
+      <td class="id">{{ m.account_identifier }}</td>
+      <td><span class="st st-{{ m.status }}">{{ m.status }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="empty">Add or update receiving accounts under <a href="/portal/methods">Payment methods</a>.</p>
+  {% endif %}
+</div>
+{% endblock %}

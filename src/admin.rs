@@ -287,6 +287,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/merchants/{merchant_id}", get(merchant_detail))
         .route("/merchants/{merchant_id}/status", post(merchant_status))
         .route("/merchants/{merchant_id}/approve", post(merchant_approve))
+        .route("/merchants/{merchant_id}/credits", post(credits_grant))
         .route("/merchants/{merchant_id}/methods", post(method_create))
         .route(
             "/merchants/{merchant_id}/methods/{method_id}/status",
@@ -295,6 +296,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route(
             "/merchants/{merchant_id}/methods/{method_id}/account",
             post(method_account),
+        )
+        .route(
+            "/merchants/{merchant_id}/methods/{method_id}/instructions",
+            post(method_instructions),
         )
         .route("/merchants/{merchant_id}/keys", post(key_create))
         .route("/merchants/{merchant_id}/keys/{key_id}/revoke", post(key_revoke))
@@ -310,18 +315,39 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/users", get(users_page).post(user_create))
         .route("/users/{user_id}/status", post(user_status))
         .route("/audit", get(audit_page))
-        .route("/logout", post(logout))
         .layer(middleware::from_fn_with_state(state.clone(), require_admin));
 
     Router::new()
         .route("/login", get(login_page).post(login_submit))
+        // Logout is public on purpose: it only clears the cookie, and both
+        // admin and portal headers post here (a gated route would bounce
+        // merchant users back to /portal without ever signing them out).
+        .route("/logout", post(logout))
         .merge(protected)
 }
 
-/// `/portal`: the merchant-user surface (own merchant data only).
+/// `/portal`: the merchant-user surface — the full ops toolkit, scoped to the
+/// signed-in user's own merchant (dashboard, checkouts, webhooks, keys, credits).
 pub fn portal_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/", get(portal_home))
+        .route("/checkouts", get(portal_checkouts))
+        .route("/checkouts/{checkout_id}", get(portal_checkout_detail))
+        .route("/webhooks", get(portal_webhooks))
+        .route("/webhooks/deliveries/{delivery_id}", get(portal_delivery_detail))
+        .route(
+            "/webhooks/deliveries/{delivery_id}/retry",
+            post(portal_delivery_retry),
+        )
+        .route("/keys", get(portal_keys_page))
+        .route("/keys/generate", post(portal_key_generate))
+        .route("/keys/{key_id}/revoke", post(portal_key_revoke))
+        .route("/keys/{key_id}/rotate", post(portal_key_rotate))
+        .route("/methods", get(portal_methods_page).post(portal_method_create))
+        .route("/methods/{method_id}/status", post(portal_method_status))
+        .route("/methods/{method_id}/account", post(portal_method_account))
+        .route("/credits", get(portal_credits_page))
+        .route("/credits/buy", post(credits_buy))
         .layer(middleware::from_fn_with_state(state, require_merchant))
 }
 
@@ -342,8 +368,9 @@ pub async fn login_page(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if session_info(&state, &headers).await.is_some() {
-        return Redirect::to("/admin").into_response();
+    if let Some(session) = session_info(&state, &headers).await {
+        let next = if session.user.role == "merchant" { "/portal" } else { "/admin" };
+        return Redirect::to(next).into_response();
     }
     page(
         StatusCode::OK,
@@ -701,6 +728,7 @@ pub struct MerchantMethodRow {
     pub provider: String,
     pub display_name: String,
     pub account_identifier: String,
+    pub instructions: String,
     pub status: String,
 }
 
@@ -733,6 +761,7 @@ pub struct MerchantPage {
     pub name: String,
     pub status: String,
     pub onboarding: String,
+    pub credits: i64,
     pub created_at: String,
     pub methods: Vec<MerchantMethodRow>,
     pub keys: Vec<MerchantKeyRow>,
@@ -758,11 +787,11 @@ async fn merchant_page(
     new_key: Option<String>,
     csrf: String,
 ) -> Response {
-    let Some((name, status, onboarding, created_at)) = sqlx::query_as::<
+    let Some((name, status, onboarding, credits, created_at)) = sqlx::query_as::<
         _,
-        (String, String, String, String),
+        (String, String, String, i64, String),
     >(
-        "SELECT name, status, onboarding_status, created_at FROM merchants WHERE id = ?",
+        "SELECT name, status, onboarding_status, credit_balance, created_at FROM merchants WHERE id = ?",
     )
     .bind(merchant_id)
     .fetch_optional(&state.pool)
@@ -773,8 +802,8 @@ async fn merchant_page(
         return not_found();
     };
 
-    let methods = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT id, provider, display_name, account_identifier, status \
+    let methods = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
     .bind(merchant_id)
@@ -782,15 +811,18 @@ async fn merchant_page(
     .await
     .map(|rows| {
         rows.into_iter()
-            .map(|(method_id, provider, display_name, account_identifier, status)| {
-                MerchantMethodRow {
-                    method_id,
-                    provider,
-                    display_name,
-                    account_identifier,
-                    status,
-                }
-            })
+            .map(
+                |(method_id, provider, display_name, account_identifier, instructions, status)| {
+                    MerchantMethodRow {
+                        method_id,
+                        provider,
+                        display_name,
+                        account_identifier,
+                        instructions,
+                        status,
+                    }
+                },
+            )
             .collect()
     })
     .unwrap_or_default();
@@ -856,6 +888,7 @@ async fn merchant_page(
             name,
             status,
             onboarding,
+            credits,
             created_at,
             methods,
             keys,
@@ -967,6 +1000,81 @@ pub async fn merchant_approve(
     Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
 }
 
+#[derive(Deserialize)]
+pub struct CreditsGrantForm {
+    pub csrf: String,
+    /// Whole ETB; 1 ETB = 1 credit.
+    pub amount: i64,
+}
+
+/// Manually grant credit (support path: the merchant paid out of band).
+/// The balance move is written to the credit ledger and audited.
+pub async fn credits_grant(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(merchant_id): Path<String>,
+    Form(form): Form<CreditsGrantForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    if form.amount <= 0 || form.amount > 1_000_000 {
+        return bad_request("credit amount must be between 1 and 1,000,000");
+    }
+
+    let mut db = match state.pool.begin().await {
+        Ok(db) => db,
+        Err(e) => return db_error(e),
+    };
+    let updated = match sqlx::query(
+        "UPDATE merchants SET credit_balance = credit_balance + ? WHERE id = ?",
+    )
+    .bind(form.amount)
+    .bind(&merchant_id)
+    .execute(&mut *db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return db_error(e),
+    };
+    if updated.rows_affected() == 0 {
+        return bad_request("merchant not found");
+    }
+    if let Err(e) = sqlx::query(
+        "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
+         VALUES (?, ?, ?, 'admin_grant', NULL, ?)",
+    )
+    .bind(new_id("crl"))
+    .bind(&merchant_id)
+    .bind(form.amount)
+    .bind(now_iso())
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    if let Err(e) = db.commit().await {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "credits.granted",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"credits\":{}}}", form.amount)),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Merchant payment methods
 // ---------------------------------------------------------------------------
@@ -981,6 +1089,21 @@ const PROVIDERS: [(&str, &str); 4] = [
 const DEFAULT_INSTRUCTIONS: &str = "Send exactly the checkout amount to the account shown\n\
     Copy the transaction reference from your wallet app\n\
     Return to this page and paste the reference";
+
+/// Customer instructions come from central per-provider config (migration
+/// 0006, editable by admins) — merchants never write the steps themselves.
+async fn provider_default_instructions(pool: &sqlx::SqlitePool, provider: &str) -> String {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT instructions FROM provider_instructions WHERE provider = ?",
+    )
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(i,)| i)
+    .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.to_string())
+}
 
 #[derive(Deserialize)]
 pub struct MethodCreateForm {
@@ -1022,13 +1145,10 @@ pub async fn method_create(
         .filter(|s| !s.is_empty())
         .unwrap_or(default_name)
         .to_string();
-    let instructions = form
-        .instructions
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_INSTRUCTIONS)
-        .to_string();
+    let instructions = match form.instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(custom) => custom.to_string(),
+        None => provider_default_instructions(&state.pool, &form.provider).await,
+    };
 
     if let Err(e) = sqlx::query(
         "INSERT INTO merchant_payment_methods \
@@ -1163,6 +1283,58 @@ pub async fn method_account(
         "payment_method",
         &method_id,
         Some(format!("{{\"merchant\":\"{merchant_id}\",\"account\":\"{account}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MethodInstructionsForm {
+    pub csrf: String,
+    pub instructions: String,
+}
+
+/// Edit the customer-facing steps of a method (central config; merchants see
+/// them but never write them).
+pub async fn method_instructions(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, method_id)): Path<(String, String)>,
+    Form(form): Form<MethodInstructionsForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let steps = form.instructions.trim().to_string();
+    if steps.is_empty() {
+        return bad_request("instructions must not be empty");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_payment_methods SET instructions = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&steps)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.instructions_changed",
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\"}}")),
     )
     .await;
 
@@ -2313,41 +2485,192 @@ const CREDIT_PACKAGES: [i64; 3] = [100, 200, 500];
 /// The platform merchant that sells credit (seeded in migration 0005).
 const PLATFORM_MERCHANT_ID: &str = "mch_seed_paybridge";
 
+pub struct PortalRecentRow {
+    pub checkout_id: String,
+    pub reference: String,
+    pub amount_display: String,
+    pub status: String,
+    pub created_at: String,
+}
+
 #[derive(Template)]
-#[template(path = "portal.html")]
-pub struct PortalPage {
+#[template(path = "portal_home.html")]
+pub struct PortalHomePage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub onboarding: String,
+    pub credits: i64,
+    pub today_total: i64,
+    pub today_succeeded: i64,
+    pub today_failed: i64,
+    pub volume_display: String,
+    pub pending: i64,
+    pub recent: Vec<PortalRecentRow>,
+    pub methods: Vec<MerchantMethodRow>,
+}
+
+#[derive(Template)]
+#[template(path = "portal_checkouts.html")]
+pub struct PortalCheckoutsPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub rows: Vec<PortalCheckoutRow>,
+    pub q: String,
+    pub status: String,
+}
+
+#[derive(Template)]
+#[template(path = "portal_checkout.html")]
+pub struct PortalCheckoutPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub checkout_id: String,
+    pub reference: String,
+    pub amount_display: String,
+    pub currency: String,
+    pub status: String,
+    pub customer: String,
+    pub return_url: Option<String>,
+    pub method: Option<(String, String)>,
+    pub transaction: Option<TransactionView>,
+    pub created_at: String,
+    pub paid_at: Option<String>,
+    pub expires_at: String,
+    pub attempts: Vec<AttemptRow>,
+    pub events: Vec<EventRow>,
+}
+
+pub struct PortalDeliveryListRow {
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub attempt_no: i64,
+    pub status_code: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Template)]
+#[template(path = "portal_webhooks.html")]
+pub struct PortalWebhooksPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub endpoints: Vec<MerchantEndpointRow>,
+    pub deliveries: Vec<PortalDeliveryListRow>,
+}
+
+#[derive(Template)]
+#[template(path = "portal_delivery.html")]
+pub struct PortalDeliveryPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub url: String,
+    pub attempt_no: i64,
+    pub ok: bool,
+    pub status_code: Option<i64>,
+    pub error: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+    pub event_status: String,
+    pub event_attempts: i64,
+    pub next_attempt_at: String,
+    pub last_error: Option<String>,
+    pub payload: String,
+    pub history: Vec<DeliveryRow>,
+}
+
+#[derive(Template)]
+#[template(path = "portal_keys.html")]
+pub struct PortalKeysPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub onboarding: String,
+    pub credits: i64,
+    pub keys: Vec<MerchantKeyRow>,
+    /// A freshly self-generated/rotated key, rendered exactly once.
+    pub new_key: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "portal_credits.html")]
+pub struct PortalCreditsPage {
+    pub section: &'static str,
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
     pub onboarding: String,
     pub credits: i64,
     pub packages: Vec<i64>,
-    pub checkouts: Vec<PortalCheckoutRow>,
-    pub keys: Vec<MerchantKeyRow>,
-    /// A freshly self-generated API key, rendered exactly once.
-    pub new_key: Option<String>,
+    pub ledger: Vec<LedgerRow>,
 }
 
-/// Merchant home: own checkouts, own API keys (prefixes only), credit balance,
-/// and the buy-credit flow — scoped to the signed-in user's merchant_id.
+/// Merchant home: own stats, recent payments, and payment methods.
 pub async fn portal_home(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
 ) -> Response {
-    let Some((merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
 
-    let checkouts = sqlx::query_as::<_, (String, String, i64, String, String)>(
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let by_status: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*), COALESCE(SUM(amount_minor), 0) \
+         FROM checkouts WHERE merchant_id = ? AND created_at >= ? GROUP BY status",
+    )
+    .bind(&merchant_id)
+    .bind(&today)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let mut today_total = 0i64;
+    let mut today_succeeded = 0i64;
+    let mut today_failed = 0i64;
+    let mut volume_minor = 0i64;
+    for (status, count, sum) in by_status {
+        today_total += count;
+        match status.as_str() {
+            "succeeded" => {
+                today_succeeded = count;
+                volume_minor = sum;
+            }
+            "failed" => today_failed = count,
+            _ => {}
+        }
+    }
+    let (pending,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM checkouts WHERE merchant_id = ? AND status = 'pending'",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or((0,));
+
+    let recent = sqlx::query_as::<_, (String, String, i64, String, String)>(
         "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
-         WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 20",
+         WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
     )
     .bind(&merchant_id)
     .fetch_all(&state.pool)
     .await
     .map(|rows| {
         rows.into_iter()
-            .map(|(id, reference, amount_minor, status, created_at)| PortalCheckoutRow {
+            .map(|(id, reference, amount_minor, status, created_at)| PortalRecentRow {
                 checkout_id: id,
                 reference,
                 amount_display: format_minor(amount_minor),
@@ -2357,6 +2680,574 @@ pub async fn portal_home(
             .collect()
     })
     .unwrap_or_default();
+
+    let methods = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT id, provider, display_name, account_identifier, instructions, status \
+         FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(method_id, provider, display_name, account_identifier, instructions, status)| {
+                    MerchantMethodRow {
+                        method_id,
+                        provider,
+                        display_name,
+                        account_identifier,
+                        instructions: String::new(),
+                        status,
+                    }
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalHomePage {
+            section: "dashboard",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            onboarding,
+            credits,
+            today_total,
+            today_succeeded,
+            today_failed,
+            volume_display: format_minor(volume_minor),
+            pending,
+            recent,
+            methods,
+        },
+    )
+}
+
+async fn portal_merchant(
+    state: &AppState,
+    sess: &SessionInfo,
+) -> Option<(String, String, String, i64)> {
+    let merchant_id = sess.user.merchant_id.as_deref()?;
+    sqlx::query_as::<_, (String, String, String, i64)>(
+        "SELECT id, name, onboarding_status, credit_balance FROM merchants WHERE id = ?",
+    )
+    .bind(merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+// --- portal: checkouts --------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct PortalCheckoutFilters {
+    pub q: Option<String>,
+    pub status: Option<String>,
+}
+
+pub async fn portal_checkouts(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Query(f): Query<PortalCheckoutFilters>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let q = f.q.unwrap_or_default().trim().to_string();
+    let status = f.status.unwrap_or_default();
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, reference, amount_minor, status, created_at FROM checkouts WHERE merchant_id = ",
+    );
+    qb.push_bind(&merchant_id);
+    if matches!(status.as_str(), "created" | "pending" | "succeeded" | "failed" | "expired") {
+        qb.push(" AND status = ").push_bind(status.clone());
+    }
+    if !q.is_empty() {
+        let needle = format!("%{q}%");
+        qb.push(" AND (reference LIKE ")
+            .push_bind(needle.clone())
+            .push(" OR id LIKE ")
+            .push_bind(needle.clone())
+            .push(" OR EXISTS (SELECT 1 FROM payments p JOIN transactions t ON t.payment_id = p.id \
+                   WHERE p.checkout_id = checkouts.id AND t.transaction_reference LIKE ")
+            .push_bind(needle)
+            .push("))");
+    }
+    qb.push(" ORDER BY created_at DESC LIMIT 50");
+
+    let rows = match qb
+        .build_query_as::<(String, String, i64, String, String)>()
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(id, reference, amount_minor, st, created_at)| PortalCheckoutRow {
+                checkout_id: id,
+                reference,
+                amount_display: format_minor(amount_minor),
+                status: st,
+                created_at,
+            })
+            .collect(),
+        Err(e) => return db_error(e),
+    };
+
+    page(
+        StatusCode::OK,
+        PortalCheckoutsPage {
+            section: "checkouts",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            rows,
+            q,
+            status,
+        },
+    )
+}
+
+pub async fn portal_checkout_detail(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Path(checkout_id): Path<String>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    // Ownership first: other merchants' checkouts look like unknown ones.
+    let Some(row) = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT reference, amount_minor, currency, status, customer_name, customer_email, \
+                return_url, expires_at, created_at, paid_at, selected_method_id \
+         FROM checkouts WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&checkout_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+    let (
+        reference,
+        amount_minor,
+        currency,
+        status,
+        customer_name,
+        customer_email,
+        return_url,
+        expires_at,
+        created_at,
+        paid_at,
+        selected_method_id,
+    ) = row;
+
+    let method = match &selected_method_id {
+        Some(method_id) => sqlx::query_as::<_, (String, String)>(
+            "SELECT provider, display_name FROM merchant_payment_methods WHERE id = ?",
+        )
+        .bind(method_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+
+    let transaction = sqlx::query_as::<_, (String, i64, String, String, String)>(
+        "SELECT t.transaction_reference, t.amount_minor, t.currency, t.recipient, t.occurred_at \
+         FROM transactions t JOIN payments p ON p.id = t.payment_id \
+         WHERE p.checkout_id = ? AND p.status = 'succeeded' \
+         ORDER BY t.created_at DESC LIMIT 1",
+    )
+    .bind(&checkout_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(reference, amount_minor, txn_currency, recipient, occurred_at)| TransactionView {
+        reference,
+        amount_display: format_minor(amount_minor),
+        currency: txn_currency,
+        recipient,
+        occurred_at,
+    });
+
+    let attempts = sqlx::query_as::<_, (String, Option<String>, String, String)>(
+        "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
+         WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(outcome, detail, transaction_reference, created_at)| AttemptRow {
+                outcome,
+                detail,
+                transaction_reference,
+                created_at,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let mut events: Vec<EventRow> = sqlx::query_as::<
+        _,
+        (String, String, String, i64, String, Option<String>, String),
+    >(
+        "SELECT id, event_type, status, attempts, next_attempt_at, last_error, payload \
+         FROM outbox_messages WHERE aggregate_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(id, event_type, ev_status, ev_attempts, next_attempt_at, last_error, payload)| {
+                EventRow {
+                    event_id: id.clone(),
+                    event_type,
+                    status: ev_status,
+                    attempts: ev_attempts,
+                    next_attempt_at,
+                    last_error,
+                    payload,
+                    deliveries: Vec::new(),
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let all_deliveries = sqlx::query_as::<
+        _,
+        (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
+    >(
+        "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
+         FROM webhook_deliveries d JOIN outbox_messages o ON o.id = d.outbox_id \
+         WHERE o.aggregate_id = ? ORDER BY d.attempt_no",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    for (outbox_id, delivery_id, attempt_no, status_code, error, duration_ms, created_at) in
+        all_deliveries
+    {
+        if let Some(event) = events.iter_mut().find(|e| e.event_id == outbox_id) {
+            event.deliveries.push(DeliveryRow {
+                delivery_id,
+                attempt_no,
+                status_code,
+                error,
+                duration_ms,
+                created_at,
+            });
+        }
+    }
+
+    let customer = [customer_name, customer_email]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+
+    page(
+        StatusCode::OK,
+        PortalCheckoutPage {
+            section: "checkouts",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            checkout_id,
+            reference,
+            amount_display: format_minor(amount_minor),
+            currency,
+            status,
+            customer,
+            return_url,
+            method,
+            transaction,
+            created_at,
+            paid_at,
+            expires_at,
+            attempts,
+            events,
+        },
+    )
+}
+
+// --- portal: webhooks ---------------------------------------------------------
+
+pub async fn portal_webhooks(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let endpoints = sqlx::query_as::<_, (String, String)>(
+        "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(url, status)| MerchantEndpointRow { url, status })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let deliveries = sqlx::query_as::<
+        _,
+        (String, String, String, i64, Option<i64>, Option<String>, String),
+    >(
+        "SELECT d.id, o.id, o.event_type, d.attempt_no, d.status_code, d.error, d.created_at \
+         FROM webhook_deliveries d \
+         JOIN outbox_messages o ON o.id = d.outbox_id \
+         JOIN webhook_endpoints e ON e.id = d.endpoint_id \
+         WHERE e.merchant_id = ? \
+         ORDER BY d.created_at DESC LIMIT 50",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(delivery_id, event_id, event_type, attempt_no, status_code, error, created_at)| {
+                    PortalDeliveryListRow {
+                        delivery_id,
+                        event_id,
+                        event_type,
+                        attempt_no,
+                        status_code,
+                        error,
+                        created_at,
+                    }
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalWebhooksPage {
+            section: "webhooks",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            endpoints,
+            deliveries,
+        },
+    )
+}
+
+pub async fn portal_delivery_detail(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Path(delivery_id): Path<String>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    // Ownership: only deliveries that went to this merchant's endpoints.
+    let Some((outbox_id, attempt_no, status_code, error, duration_ms, created_at)) =
+        sqlx::query_as::<
+            _,
+            (String, i64, Option<i64>, Option<String>, Option<i64>, String),
+        >(
+            "SELECT d.outbox_id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
+             FROM webhook_deliveries d \
+             JOIN webhook_endpoints e ON e.id = d.endpoint_id \
+             WHERE d.id = ? AND e.merchant_id = ?",
+        )
+        .bind(&delivery_id)
+        .bind(&merchant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found();
+    };
+
+    let Some((event_type, event_status, event_attempts, next_attempt_at, last_error, payload)) =
+        sqlx::query_as::<_, (String, String, i64, String, Option<String>, String)>(
+            "SELECT event_type, status, attempts, next_attempt_at, last_error, payload \
+             FROM outbox_messages WHERE id = ?",
+        )
+        .bind(&outbox_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found();
+    };
+
+    let url = sqlx::query_as::<_, (String,)>(
+        "SELECT url FROM webhook_endpoints WHERE merchant_id = ? AND status = 'active' LIMIT 1",
+    )
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(u,)| u)
+    .unwrap_or_default();
+
+    let history = sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+        "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
+         FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
+    )
+    .bind(&outbox_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(delivery_id, attempt_no, status_code, error, duration_ms, created_at)| DeliveryRow {
+                    delivery_id,
+                    attempt_no,
+                    status_code,
+                    error,
+                    duration_ms,
+                    created_at,
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalDeliveryPage {
+            section: "webhooks",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            delivery_id,
+            event_id: outbox_id,
+            event_type,
+            url,
+            attempt_no,
+            ok: status_code.map(|c| (200..300).contains(&c)).unwrap_or(false),
+            status_code,
+            error,
+            duration_ms,
+            created_at,
+            event_status,
+            event_attempts,
+            next_attempt_at,
+            last_error,
+            payload,
+            history,
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct PortalRetryForm {
+    pub csrf: String,
+}
+
+/// Retry one of the merchant's own webhook deliveries.
+pub async fn portal_delivery_retry(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+    Form(form): Form<PortalRetryForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let Some((event_id,)): Option<(String,)> = sqlx::query_as(
+        "SELECT d.outbox_id FROM webhook_deliveries d \
+         JOIN webhook_endpoints e ON e.id = d.endpoint_id \
+         WHERE d.id = ? AND e.merchant_id = ?",
+    )
+    .bind(&delivery_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE outbox_messages \
+         SET status = 'pending', attempts = MAX(attempts - 1, 0), next_attempt_at = ? \
+         WHERE id = ?",
+    )
+    .bind(now_iso())
+    .bind(&event_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "webhook.retried",
+        "webhook_event",
+        &event_id,
+        Some(format!("{{\"delivery\":\"{delivery_id}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/portal/webhooks/deliveries/{delivery_id}")).into_response()
+}
+
+// --- portal: API keys -----------------------------------------------------------
+
+pub async fn portal_keys_page(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    portal_keys_view(&state, &sess, None).await
+}
+
+async fn portal_keys_view(state: &AppState, sess: &SessionInfo, new_key: Option<String>) -> Response {
+    let Some((merchant_id, merchant_name, onboarding, credits)) = portal_merchant(state, sess).await else {
+        return not_found();
+    };
 
     let keys = sqlx::query_as::<_, (String, String, String, Option<String>)>(
         "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
@@ -2379,30 +3270,485 @@ pub async fn portal_home(
 
     page(
         StatusCode::OK,
-        PortalPage {
-            csrf: sess.token,
-            email: sess.user.email,
+        PortalKeysPage {
+            section: "keys",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             merchant_name,
             onboarding,
             credits,
-            packages: CREDIT_PACKAGES.to_vec(),
-            checkouts,
             keys,
-            new_key: None,
+            new_key,
         },
     )
 }
 
-async fn portal_merchant(state: &AppState, sess: &SessionInfo) -> Option<(String, String, i64)> {
-    let merchant_id = sess.user.merchant_id.as_deref()?;
-    sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT name, onboarding_status, credit_balance FROM merchants WHERE id = ?",
+#[derive(Deserialize)]
+pub struct PortalKeyForm {
+    pub csrf: String,
+}
+
+/// Self-serve API key: merchants with credit generate their own keys. The
+/// secret is shown once on the rendered portal page.
+pub async fn portal_key_generate(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<PortalKeyForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, onboarding, credits)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    if onboarding != "approved" || credits < 1 {
+        return bad_request("buy credit first — API keys are enabled once your account has credit");
+    }
+    let secret = match insert_api_key(&state.pool, &merchant_id, "test").await {
+        Ok(s) => s,
+        Err(e) => return db_error(e),
+    };
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.created",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"kind\":\"test\",\"prefix\":\"{}\",\"self\":true}}", &secret[..12])),
     )
-    .bind(merchant_id)
+    .await;
+
+    portal_keys_view(&state, &sess, Some(secret)).await
+}
+
+/// Revoke one of the merchant's own keys.
+pub async fn portal_key_revoke(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    Form(form): Form<PortalKeyForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let prefix: Option<(String,)> = sqlx::query_as(
+        "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&key_id)
+    .bind(&merchant_id)
     .fetch_optional(&state.pool)
     .await
     .ok()
-    .flatten()
+    .flatten();
+    let Some((prefix,)) = prefix else {
+        return not_found();
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_api_keys SET revoked_at = ? \
+         WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
+    )
+    .bind(now_iso())
+    .bind(&key_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.revoked",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"key\":\"{key_id}\",\"prefix\":\"{prefix}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to("/portal/keys").into_response()
+}
+
+/// Rotate one of the merchant's own keys (old dies, new secret shown once).
+pub async fn portal_key_rotate(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(key_id): Path<String>,
+    Form(form): Form<PortalKeyForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let old: Option<(String,)> = sqlx::query_as(
+        "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
+    )
+    .bind(&key_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((old_prefix,)) = old else {
+        return not_found();
+    };
+    let kind = old_prefix
+        .strip_prefix("pb_sk_")
+        .and_then(|rest| rest.split('_').next())
+        .unwrap_or("test")
+        .to_string();
+
+    let mut db = match state.pool.begin().await {
+        Ok(db) => db,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+    .bind(now_iso())
+    .bind(&key_id)
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    let new_secret = match insert_api_key_tx(&mut db, &merchant_id, &kind).await {
+        Ok(s) => s,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = db.commit().await {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.rotated",
+        "merchant",
+        &merchant_id,
+        Some(format!(
+            "{{\"key\":\"{key_id}\",\"old_prefix\":\"{old_prefix}\",\"new_prefix\":\"{}\",\"self\":true}}",
+            &new_secret[..12]
+        )),
+    )
+    .await;
+
+    portal_keys_view(&state, &sess, Some(new_secret)).await
+}
+
+// --- portal: credits ------------------------------------------------------------
+
+pub struct LedgerRow {
+    pub delta: i64,
+    pub reason: String,
+    pub checkout_id: Option<String>,
+    pub created_at: String,
+}
+
+pub async fn portal_credits_page(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    let Some((merchant_id, merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let ledger = sqlx::query_as::<_, (i64, String, Option<String>, String)>(
+        "SELECT delta, reason, checkout_id, created_at FROM credit_ledger \
+         WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(delta, reason, checkout_id, created_at)| LedgerRow {
+                delta,
+                reason,
+                checkout_id,
+                created_at,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalCreditsPage {
+            section: "credits",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            onboarding,
+            credits,
+            packages: CREDIT_PACKAGES.to_vec(),
+            ledger,
+        },
+    )
+}
+
+// --- portal: payment methods ---------------------------------------------------
+// Merchants add their own provider + receiving account; the customer-facing
+// steps come from central provider config and are never merchant-authored.
+
+#[derive(Template)]
+#[template(path = "portal_methods.html")]
+pub struct PortalMethodsPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub methods: Vec<MerchantMethodRow>,
+    pub providers: Vec<(String, String)>,
+}
+
+pub async fn portal_methods_page(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let methods = sqlx::query_as::<_, (String, String, String, String, String)>(
+        "SELECT id, provider, display_name, account_identifier, status \
+         FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(method_id, provider, display_name, account_identifier, status)| {
+                MerchantMethodRow {
+                    method_id,
+                    provider,
+                    display_name,
+                    account_identifier,
+                    instructions: String::new(),
+                    status,
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalMethodsPage {
+            section: "methods",
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
+            merchant_name,
+            methods,
+            providers: PROVIDERS
+                .iter()
+                .map(|(p, n)| (p.to_string(), n.to_string()))
+                .collect(),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct PortalMethodCreateForm {
+    pub csrf: String,
+    pub provider: String,
+    pub display_name: Option<String>,
+    pub account_identifier: String,
+}
+
+/// Add a receiving account for a provider. The customer-facing steps are
+/// filled from central provider config — the form has no instructions field.
+pub async fn portal_method_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<PortalMethodCreateForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let Some((_, default_name)) = PROVIDERS.iter().find(|(p, _)| *p == form.provider.as_str())
+    else {
+        return bad_request("unknown provider");
+    };
+    let account = form.account_identifier.trim().to_string();
+    if account.is_empty() {
+        return bad_request("receiving account is required");
+    }
+    let display_name = form
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_name)
+        .to_string();
+    let instructions = provider_default_instructions(&state.pool, &form.provider).await;
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO merchant_payment_methods \
+         (id, merchant_id, provider, display_name, account_identifier, instructions, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+    )
+    .bind(new_id("mpm"))
+    .bind(&merchant_id)
+    .bind(&form.provider)
+    .bind(&display_name)
+    .bind(&account)
+    .bind(&instructions)
+    .bind(now_iso())
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.added",
+        "merchant",
+        &merchant_id,
+        Some(format!(
+            "{{\"provider\":\"{}\",\"account\":\"{account}\",\"self\":true}}",
+            form.provider
+        )),
+    )
+    .await;
+
+    Redirect::to("/portal/methods").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PortalMethodStatusForm {
+    pub csrf: String,
+    pub action: String,
+}
+
+/// Enable/disable one of the merchant's own methods.
+pub async fn portal_method_status(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(method_id): Path<String>,
+    Form(form): Form<PortalMethodStatusForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let next_status = match form.action.as_str() {
+        "enable" => "active",
+        "disable" => "disabled",
+        _ => return bad_request("unknown action"),
+    };
+
+    let updated = sqlx::query(
+        "UPDATE merchant_payment_methods SET status = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(next_status)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await;
+    let Ok(updated) = updated else {
+        return db_error(updated.err().unwrap());
+    };
+    if updated.rows_affected() == 0 {
+        return not_found();
+    }
+
+    let action =
+        if next_status == "active" { "payment_method.enabled" } else { "payment_method.disabled" };
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        action,
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to("/portal/methods").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PortalMethodAccountForm {
+    pub csrf: String,
+    pub account_identifier: String,
+}
+
+/// Update the receiving wallet of one of the merchant's own methods. Audited;
+/// the credit ledger + transactions keep the history for disputes.
+pub async fn portal_method_account(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(method_id): Path<String>,
+    Form(form): Form<PortalMethodAccountForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let account = form.account_identifier.trim().to_string();
+    if account.is_empty() {
+        return bad_request("receiving account is required");
+    }
+
+    let updated = sqlx::query(
+        "UPDATE merchant_payment_methods SET account_identifier = ? \
+         WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&account)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await;
+    let Ok(updated) = updated else {
+        return db_error(updated.err().unwrap());
+    };
+    if updated.rows_affected() == 0 {
+        return not_found();
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.account_changed",
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"account\":\"{account}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to("/portal/methods").into_response()
 }
 
 #[derive(Deserialize)]
@@ -2424,7 +3770,7 @@ pub async fn credits_buy(
     if !CREDIT_PACKAGES.contains(&form.credits) {
         return bad_request("choose a credit package");
     }
-    let Some((_, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((_, _, _, _)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
     let merchant_id = sess.user.merchant_id.clone().unwrap_or_default();
@@ -2487,51 +3833,6 @@ pub async fn credits_buy(
     .await;
 
     Redirect::to(&format!("/c/{checkout_id}")).into_response()
-}
-
-#[derive(Deserialize)]
-pub struct PortalKeyForm {
-    pub csrf: String,
-}
-
-/// Self-serve API key: merchants with credit generate their own keys. The
-/// secret is shown once on the rendered portal page.
-pub async fn portal_key_generate(
-    State(state): State<AppState>,
-    Extension(sess): Extension<SessionInfo>,
-    headers: HeaderMap,
-    Form(form): Form<PortalKeyForm>,
-) -> Response {
-    if !csrf_ok(&sess, &form.csrf) {
-        return bad_request("expired session; go back and retry");
-    }
-    let Some((merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
-        return not_found();
-    };
-    if onboarding != "approved" || credits < 1 {
-        return bad_request("buy credit first — API keys are enabled once your account has credit");
-    }
-    let merchant_id = sess.user.merchant_id.clone().unwrap_or_default();
-    let secret = match insert_api_key(&state.pool, &merchant_id, "test").await {
-        Ok(s) => s,
-        Err(e) => return db_error(e),
-    };
-
-    audit(
-        &state.pool,
-        &sess.user.email,
-        client_ip(&headers).as_deref(),
-        "api_key.created",
-        "merchant",
-        &merchant_id,
-        Some(format!("{{\"kind\":\"test\",\"prefix\":\"{}\",\"self\":true}}", &secret[..12])),
-    )
-    .await;
-
-    let _ = merchant_name;
-    let page = portal_home(State(state), Extension(sess)).await;
-    // portal_home rendered without the secret; re-render with it.
-    page
 }
 
 // ---------------------------------------------------------------------------
