@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}{{ section|title }}{% endblock %} — PayBridge Admin</title>
+  <style>
+    :root {
+      --ink: #111827; --muted: #6b7280; --line: #e5e7eb;
+      --brand: #047857; --brand-soft: #ecfdf5; --danger: #b91c1c; --danger-soft: #fef2f2;
+      --amber: #92400e; --amber-soft: #fffbeb;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #f3f6f5; color: var(--ink); min-height: 100vh;
+    }
+    header.top {
+      background: #0f172a; color: #fff; display: flex; align-items: center; gap: 28px;
+      padding: 0 24px; height: 54px; position: sticky; top: 0; z-index: 10;
+    }
+    header .logo { color: #fff; text-decoration: none; font-weight: 700; font-size: 15px; }
+    header .logo b { color: #34d399; }
+    header nav { display: flex; gap: 4px; flex: 1; }
+    header nav a {
+      color: #cbd5e1; text-decoration: none; font-size: 13.5px; padding: 6px 12px; border-radius: 8px;
+    }
+    header nav a:hover { background: #1e293b; color: #fff; }
+    header nav a.on { background: #134e4a; color: #6ee7b7; font-weight: 600; }
+    header form button {
+      background: #1e293b; color: #cbd5e1; border: 0; border-radius: 8px;
+      padding: 7px 14px; font-size: 13px; cursor: pointer;
+    }
+    header form button:hover { color: #fff; background: #334155; }
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
+    h1 { font-size: 20px; margin-bottom: 18px; }
+    h2 { font-size: 14px; margin-bottom: 10px; }
+    a { color: var(--brand); }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat { background: #fff; border-radius: 14px; padding: 16px 18px; box-shadow: 0 4px 16px rgba(17,24,39,.06); }
+    .stat .label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .stat b { font-size: 24px; letter-spacing: -.01em; }
+
+    .card {
+      background: #fff; border-radius: 14px; padding: 20px 22px;
+      box-shadow: 0 4px 16px rgba(17,24,39,.06); margin-bottom: 20px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    th {
+      text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line);
+    }
+    td { padding: 9px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    td.num, th.num { text-align: right; }
+    .id { font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+    pre.payload {
+      background: #0f172a; color: #a5f3d0; border-radius: 10px; padding: 14px;
+      font-size: 12px; overflow-x: auto; margin-top: 8px; white-space: pre-wrap; word-break: break-all;
+    }
+
+    .st {
+      display: inline-block; padding: 3px 10px; border-radius: 999px;
+      font-size: 11.5px; font-weight: 700; letter-spacing: .02em;
+    }
+    .st-succeeded, .st-delivered, .st-active, .st-on { background: var(--brand-soft); color: var(--brand); }
+    .st-pending, .st-created, .st-initiated { background: var(--amber-soft); color: var(--amber); }
+    .st-failed, .st-expired, .st-dead, .st-disabled, .st-revoked { background: var(--danger-soft); color: var(--danger); }
+
+    .dl { display: grid; grid-template-columns: 180px 1fr; gap: 7px 16px; font-size: 13.5px; }
+    .dl dt { color: var(--muted); }
+    .dl dd { word-break: break-all; }
+
+    form.inline { display: inline; }
+    button.act {
+      background: #fff; border: 1.5px solid var(--line); border-radius: 9px;
+      padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--ink);
+    }
+    button.act:hover { border-color: var(--brand); color: var(--brand); }
+    button.act.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+    .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .filters input[type=text], .filters select {
+      border: 1.5px solid var(--line); border-radius: 9px; padding: 8px 12px; font-size: 13.5px; background: #fff;
+    }
+    .filters input[type=text] { flex: 1; min-width: 220px; }
+    .filters button {
+      background: var(--brand); color: #fff; border: 0; border-radius: 9px;
+      padding: 8px 18px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+    }
+    .empty { color: var(--muted); font-size: 13.5px; padding: 14px 4px; }
+    .section-label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 0 8px; }
+    .back { font-size: 13px; text-decoration: none; }
+
+    /* merchant management forms */
+    .card form { font-size: 13.5px; }
+    .card label { display: block; font-size: 12.5px; color: var(--muted); font-weight: 600; }
+    .card input[type=text], .card select, .card textarea {
+      display: block; margin-top: 4px;
+      border: 1.5px solid var(--line); border-radius: 9px;
+      padding: 8px 10px; font-size: 13.5px; background: #fff; color: var(--ink);
+      font-family: inherit;
+    }
+    .card textarea { width: 100%; }
+    .card input[type=text]:focus, .card select:focus, .card textarea:focus {
+      outline: none; border-color: var(--brand);
+    }
+    .form-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+    .form-row label { flex: 1; min-width: 160px; }
+    td.acct-form { display: flex; gap: 6px; }
+    td.acct-form input[type=text] { display: inline; margin-top: 0; width: 170px; font-family: ui-monospace, "Cascadia Mono", monospace; }
+    td form.inline { display: inline-block; margin-right: 6px; }
+    .key-reveal {
+      background: var(--amber-soft); border: 1.5px solid #fde68a; border-radius: 10px;
+      padding: 12px 14px; margin-bottom: 14px; font-size: 13px; color: var(--amber);
+    }
+    .key-reveal code {
+      display: block; margin-top: 6px; padding: 8px 10px;
+      background: #fff; border: 1px solid #fde68a; border-radius: 8px;
+      font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 13px;
+      color: var(--ink); word-break: break-all; user-select: all;
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <a class="logo" href="/admin">PayBridge <b>Admin</b></a>
+    <nav>
+      <a href="/admin" {% if section == "dashboard" %}class="on"{% endif %}>Dashboard</a>
+      <a href="/admin/merchants" {% if section == "merchants" %}class="on"{% endif %}>Merchants</a>
+      <a href="/admin/checkouts" {% if section == "checkouts" %}class="on"{% endif %}>Checkouts</a>
+      <a href="/admin/webhooks" {% if section == "webhooks" %}class="on"{% endif %}>Webhooks</a>
+      <a href="/admin/users" {% if section == "users" %}class="on"{% endif %}>Users</a>
+      <a href="/admin/audit" {% if section == "audit" %}class="on"{% endif %}>Audit log</a>
+    </nav>
+    <form method="post" action="/admin/logout">
+      <input type="hidden" name="csrf" value="{{ csrf }}" />
+      <button type="submit">Sign out</button>
+    </form>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

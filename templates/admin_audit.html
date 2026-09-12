@@ -1,0 +1,25 @@
+{% extends "admin_base.html" %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+
+<div class="card">
+  {% if rows.is_empty() %}
+  <p class="empty">No admin activity recorded yet.</p>
+  {% else %}
+  <table>
+    <tr><th>Actor</th><th>Action</th><th>Resource</th><th>IP</th><th>Metadata</th><th>Time</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.actor }}</td>
+      <td><b>{{ r.action }}</b></td>
+      <td>{{ r.resource }}<br /><span class="id">{{ r.resource_id }}</span></td>
+      <td class="id">{% match r.ip %}{% when Some with (ip) %}{{ ip }}{% when None %}&mdash;{% endmatch %}</td>
+      <td class="id">{% match r.metadata %}{% when Some with (m) %}{{ m }}{% when None %}&mdash;{% endmatch %}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

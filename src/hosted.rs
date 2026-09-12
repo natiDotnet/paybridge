@@ -148,6 +148,9 @@ fn load_slides(static_dir: &std::path::Path, provider: &str) -> Vec<SlideView> {
 
 fn error_text(reason: &str, amount_display: &str) -> String {
     match reason {
+        "insufficient_credits" => "This merchant's PayBridge credit has run out, so the payment \
+            cannot be verified right now. Please contact the merchant about your order."
+            .to_string(),
         "amount_mismatch" => format!(
             "The transaction we found is for a different amount. Make sure you send exactly {amount_display}."
         ),
@@ -448,6 +451,9 @@ pub async fn verify_form(
         }
         Ok(VerifyResult::TooManyAttempts) => see_other(format!("/c/{checkout_id}?error=too_many_attempts")),
         Ok(VerifyResult::AttemptCooldown) => see_other(format!("/c/{checkout_id}?error=attempt_cooldown")),
+        Ok(VerifyResult::InsufficientCredits) => {
+            see_other(format!("/c/{checkout_id}?error=insufficient_credits"))
+        }
         Ok(VerifyResult::ServiceUnavailable(_)) => {
             see_other(format!("/c/{checkout_id}?error=verification_service_unavailable"))
         }

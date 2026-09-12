@@ -26,6 +26,10 @@ pub struct Config {
     pub worker_poll_interval: Duration,
     /// Directory with static assets (payment-app walkthrough slides etc.).
     pub static_dir: std::path::PathBuf,
+    /// Password for the /admin portal (single shared admin; roles come later).
+    pub admin_password: String,
+    /// Email of the bootstrapped superadmin user (see admin::ensure_bootstrap_admin).
+    pub admin_email: String,
 }
 
 impl Config {
@@ -62,6 +66,12 @@ impl Config {
             static_dir: std::path::PathBuf::from(
                 get("PAYBRIDGE_STATIC_DIR").unwrap_or_else(|| "static".into()),
             ),
+            admin_password: get("PAYBRIDGE_ADMIN_PASSWORD").unwrap_or_else(|| {
+                tracing::warn!("PAYBRIDGE_ADMIN_PASSWORD not set; using the dev default — set it before exposing /admin");
+                "paybridge-admin".into()
+            }),
+            admin_email: get("PAYBRIDGE_ADMIN_EMAIL")
+                .unwrap_or_else(|| "admin@paybridge.local".into()),
         }
     }
 }

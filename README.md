@@ -77,7 +77,34 @@ reference on another checkout returns `transaction_already_used` (409).
 | POST | `/c/{id}/verify` | — + CSRF | Form verify → PRG redirect / merchant returnUrl |
 | GET | `/docs` | — | Scalar API reference (interactive, try-it-out) |
 | GET | `/api-docs/openapi.json` | — | OpenAPI 3.1 document |
+| GET | `/admin`… | admin password | Admin portal (dashboard, merchants, checkouts, webhooks, audit log) |
 | GET | `/health` | — | Liveness |
+
+## Admin portal, users & merchant signup
+
+Sign in at [/admin/login](http://localhost:4000/admin/login) with an email +
+password. The first superadmin is bootstrapped on startup from
+`PAYBRIDGE_ADMIN_EMAIL` / `PAYBRIDGE_ADMIN_PASSWORD` (dev defaults
+`admin@paybridge.local` / `paybridge-admin` — override both outside local
+development). Passwords are stored as PBKDF2-SHA256 hashes; sessions are
+HMAC cookies bound to the password hash, so changing or disabling a user kills
+their sessions.
+
+**Merchant signup** at [/signup](http://localhost:4000/signup): creates a
+`pending` merchant plus its owner user (role `merchant`). Pending merchants
+fail API-key authentication; a superadmin approves them from the merchant
+detail page. Merchant-role users sign into a minimal portal at
+[`/portal`](http://localhost:4000/portal) showing their approval status, their
+own checkouts, and their API key prefixes — scoped strictly to their merchant.
+
+**Roles** (enforced server-side; admin actions are audited with the acting
+user): `superadmin` (full, incl. user management at `/admin/users` and merchant
+approval), `operations` (retry webhooks), `developer` (retry webhooks, manage
+API keys), `support` (view only), `merchant` (portal only). The admin portal
+itself: dashboard (today's payments/volume/pending), merchant management
+(suspend/reactivate, payment methods, API keys with rotate — secret shown
+once), checkout search, webhook delivery inspection with retry, and an audit
+log of every sensitive action.
 
 ## Verification rules (all must pass before a checkout is paid)
 

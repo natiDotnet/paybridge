@@ -104,6 +104,11 @@ pub async fn verify(
             Json(json!({"error": "attempt_cooldown"})),
         )
             .into_response(),
+        Ok(VerifyResult::InsufficientCredits) => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"error": "insufficient_credits"})),
+        )
+            .into_response(),
         Ok(VerifyResult::ServiceUnavailable(message)) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": "verification_service_unavailable", "message": message})),

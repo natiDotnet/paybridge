@@ -1,0 +1,52 @@
+{% extends "admin_base.html" %}
+{% block title %}Delivery {{ delivery_id }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/admin/webhooks">&larr; All deliveries</a></p>
+<h1>Delivery
+  {% match status_code %}{% when Some with (code) %}<span class="st {% if ok %}st-delivered{% else %}st-failed{% endif %}">{{ code }}</span>{% when None %}<span class="st st-failed">error</span>{% endmatch %}
+</h1>
+
+<div class="card">
+  <div class="dl">
+    <dt>Delivery ID</dt><dd class="id">{{ delivery_id }}</dd>
+    <dt>Event</dt><dd>{{ event_type }} &middot; <span class="st st-{{ event_status }}">{{ event_status }}</span></dd>
+    <dt>Event ID</dt><dd class="id">{{ event_id }}</dd>
+    <dt>Merchant</dt><dd>{{ merchant }}</dd>
+    <dt>Endpoint</dt><dd class="id">{{ url }}</dd>
+    <dt>Attempt</dt><dd>#{{ attempt_no }} (event has {{ event_attempts }} attempts so far)</dd>
+    <dt>Attempted at</dt><dd>{{ created_at }}</dd>
+    <dt>Response</dt><dd>{% match status_code %}{% when Some with (code) %}HTTP {{ code }}{% when None %}no response{% endmatch %}{% match duration_ms %}{% when Some with (ms) %} &middot; {{ ms }} ms{% when None %}{% endmatch %}</dd>
+    {% match error %}{% when Some with (err) %}<dt>Error</dt><dd>{{ err }}</dd>{% when None %}{% endmatch %}
+    {% match last_error %}{% when Some with (err) %}<dt>Last event error</dt><dd>{{ err }}</dd>{% when None %}{% endmatch %}
+    <dt>Next retry</dt><dd>{{ next_attempt_at }}</dd>
+  </div>
+  <p style="margin-top:14px">
+    <form class="inline" method="post" action="/admin/webhooks/deliveries/{{ delivery_id }}/retry">
+      <input type="hidden" name="csrf" value="{{ csrf }}" />
+      <button class="act" type="submit">Retry delivery now</button>
+    </form>
+  </p>
+</div>
+
+<p class="section-label">Request payload</p>
+<div class="card">
+  <pre class="payload">{{ payload }}</pre>
+</div>
+
+<p class="section-label">Attempt history for this event</p>
+<div class="card">
+  <table>
+    <tr><th>Delivery</th><th class="num">Attempt</th><th class="num">Response</th><th class="num">Duration</th><th>Error</th><th>At</th></tr>
+    {% for d in history %}
+    <tr>
+      <td><a href="/admin/webhooks/deliveries/{{ d.delivery_id }}">{{ d.delivery_id }}</a></td>
+      <td class="num">#{{ d.attempt_no }}</td>
+      <td class="num">{% match d.status_code %}{% when Some with (code) %}{{ code }}{% when None %}&mdash;{% endmatch %}</td>
+      <td class="num">{% match d.duration_ms %}{% when Some with (ms) %}{{ ms }} ms{% when None %}&mdash;{% endmatch %}</td>
+      <td>{% match d.error %}{% when Some with (err) %}{{ err }}{% when None %}&mdash;{% endmatch %}</td>
+      <td>{{ d.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

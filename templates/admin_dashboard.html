@@ -1,0 +1,32 @@
+{% extends "admin_base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats">
+  <div class="stat"><span class="label">Today's payments</span><b>{{ today_total }}</b></div>
+  <div class="stat"><span class="label">Successful today</span><b>{{ today_succeeded }}</b></div>
+  <div class="stat"><span class="label">Failed today</span><b>{{ today_failed }}</b></div>
+  <div class="stat"><span class="label">ETB volume today</span><b>{{ volume_display }}</b></div>
+  <div class="stat"><span class="label">Pending (open)</span><b>{{ pending }}</b></div>
+</div>
+
+<div class="card">
+  <h2>Recent payments</h2>
+  {% if recent.is_empty() %}
+  <p class="empty">No checkouts yet.</p>
+  {% else %}
+  <table>
+    <tr><th>Reference</th><th>Merchant</th><th class="num">Amount</th><th>Status</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td><a href="/admin/checkouts/{{ r.checkout_id }}">{{ r.reference }}</a><br /><span class="id">{{ r.checkout_id }}</span></td>
+      <td>{{ r.merchant }}</td>
+      <td class="num">{{ r.amount_display }}</td>
+      <td><span class="st st-{{ r.status }}">{{ r.status }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

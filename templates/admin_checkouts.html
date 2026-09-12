@@ -1,0 +1,46 @@
+{% extends "admin_base.html" %}
+{% block title %}Checkouts{% endblock %}
+{% block content %}
+<h1>Checkouts</h1>
+
+<div class="card">
+  <form class="filters" method="get" action="/admin/checkouts">
+    <input type="text" name="q" value="{{ q }}" placeholder="Reference, checkout ID, or transaction reference" />
+    <select name="status">
+      <option value="">Any status</option>
+      <option value="created" {% if status == "created" %}selected{% endif %}>created</option>
+      <option value="pending" {% if status == "pending" %}selected{% endif %}>pending</option>
+      <option value="succeeded" {% if status == "succeeded" %}selected{% endif %}>succeeded</option>
+      <option value="failed" {% if status == "failed" %}selected{% endif %}>failed</option>
+      <option value="expired" {% if status == "expired" %}selected{% endif %}>expired</option>
+    </select>
+    <select name="merchant">
+      <option value="">Any merchant</option>
+      {% for m in merchants %}
+      <option value="{{ m.0 }}" {% if merchant == m.0 %}selected{% endif %}>{{ m.1 }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Search</button>
+  </form>
+</div>
+
+<div class="card">
+  {% if rows.is_empty() %}
+  <p class="empty">No checkouts match.</p>
+  {% else %}
+  <table>
+    <tr><th>Checkout</th><th>Merchant</th><th>Reference</th><th class="num">Amount</th><th>Status</th><th>Created</th></tr>
+    {% for c in rows %}
+    <tr>
+      <td><a href="/admin/checkouts/{{ c.checkout_id }}">{{ c.checkout_id }}</a></td>
+      <td>{{ c.merchant }}</td>
+      <td>{{ c.reference }}</td>
+      <td class="num">{{ c.amount_display }}</td>
+      <td><span class="st st-{{ c.status }}">{{ c.status }}</span></td>
+      <td>{{ c.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

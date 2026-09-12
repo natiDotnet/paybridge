@@ -24,6 +24,10 @@ impl ApiError {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or missing API key")
     }
 
+    pub fn payment_required(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYMENT_REQUIRED, code, message)
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }

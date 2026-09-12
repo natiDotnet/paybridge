@@ -21,6 +21,8 @@ async fn main() {
         .run(&pool)
         .await
         .expect("failed to run migrations");
+    paybridge::admin::ensure_bootstrap_admin(&pool, &config.admin_email, &config.admin_password)
+        .await;
 
     let verifier = Arc::new(verify::Verifier::from_config(&config));
     tracing::info!(verifier = ?config.verifier, "verification adapter selected");

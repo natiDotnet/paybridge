@@ -62,6 +62,8 @@ async fn full_checkout_flow() {
         webhook_schedule: vec![Duration::ZERO, Duration::ZERO],
         worker_poll_interval: Duration::from_secs(1),
         static_dir: std::path::PathBuf::from("static"),
+        admin_password: "test-admin".into(),
+        admin_email: "admin@paybridge.test".into(),
     });
     let state = AppState {
         pool,

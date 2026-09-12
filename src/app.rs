@@ -41,6 +41,12 @@ pub fn build_app(state: AppState) -> Router {
             post(crate::public_verify::verify),
         )
         .nest("/c", hosted)
+        .nest("/admin", crate::admin::router(state.clone()))
+        .nest("/portal", crate::admin::portal_router(state.clone()))
+        .route(
+            "/signup",
+            get(crate::admin::signup_page).post(crate::admin::signup_submit),
+        )
         .nest_service(
             "/static",
             tower_http::services::ServeDir::new(&state.config.static_dir),

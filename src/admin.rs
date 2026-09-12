@@ -1,0 +1,2564 @@
+//! Admin portal (MVP): dashboard, merchants, checkouts, webhooks, audit log.
+//! Single shared admin password from `PAYBRIDGE_ADMIN_PASSWORD`; the session
+//! is an HMAC cookie and forms double-submit it as CSRF. Roles and merchant
+//! self-service are deliberately out of scope for now.
+
+use axum::extract::{Form, Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
+use axum::{Extension, Router};
+use askama::Template;
+use hmac::{Hmac, Mac};
+use serde::Deserialize;
+use sha2::Sha256;
+use std::collections::HashMap;
+
+use crate::ids::{new_id, now_iso};
+use crate::money::format_minor;
+use crate::state::AppState;
+
+const USER_COOKIE: &str = "pb_user";
+const SESSION_DOMAIN: &str = "paybridge-user-session-v1";
+const PBKDF2_ITERATIONS: u32 = 20_000;
+
+/// The authenticated identity, inserted into request extensions by the
+/// session middleware and consumed by handlers for capability checks.
+#[derive(Clone)]
+pub struct SessionInfo {
+    pub user: CurrentUser,
+    /// Session token (also the double-submit CSRF value of user forms).
+    pub token: String,
+}
+
+#[derive(Clone)]
+pub struct CurrentUser {
+    pub id: String,
+    pub email: String,
+    pub role: String,
+    pub merchant_id: Option<String>,
+}
+
+/// Mutation capabilities from the permission matrix; every platform role has
+/// view access to the operational pages.
+pub enum Cap {
+    ManageMerchants,
+    ManageApiKeys,
+    ManageWebhooks,
+    ManageUsers,
+}
+
+pub fn can(role: &str, cap: &Cap) -> bool {
+    match role {
+        "superadmin" => true,
+        "operations" => matches!(cap, Cap::ManageWebhooks),
+        "developer" => matches!(cap, Cap::ManageWebhooks | Cap::ManageApiKeys),
+        // "support" and unknown roles are view-only.
+        _ => false,
+    }
+}
+
+// --- passwords ---------------------------------------------------------------
+
+/// Bare PBKDF2-HMAC-SHA256 (single block); we only need password verification
+/// and don't want an extra crypto dependency for this MVP.
+fn pbkdf2_hmac_sha256(password: &str, salt: &str, iterations: u32) -> [u8; 32] {
+    let key = password.as_bytes();
+    let mut block = Vec::with_capacity(salt.len() + 4);
+    block.extend_from_slice(salt.as_bytes());
+    block.extend_from_slice(&1u32.to_be_bytes());
+    let mut u: [u8; 32] = hmac_sha256(key, &block);
+    let mut t = u;
+    for _ in 1..iterations {
+        u = hmac_sha256(key, &u);
+        for (ti, ui) in t.iter_mut().zip(u.iter()) {
+            *ti ^= *ui;
+        }
+    }
+    t
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
+
+pub fn hash_password(password: &str) -> String {
+    let salt = format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new());
+    format!(
+        "pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${}",
+        hex::encode(pbkdf2_hmac_sha256(password, &salt, PBKDF2_ITERATIONS))
+    )
+}
+
+pub fn verify_password(password: &str, stored: &str) -> bool {
+    let parts: Vec<&str> = stored.split('$').collect();
+    if parts.len() != 4 || parts[0] != "pbkdf2_sha256" {
+        return false;
+    }
+    let Ok(iterations) = parts[1].parse::<u32>() else { return false };
+    if iterations == 0 || iterations > 2_000_000 {
+        return false;
+    }
+    let Ok(expected) = hex::decode(parts[3]) else { return false };
+    ct_eq(&pbkdf2_hmac_sha256(password, parts[2], iterations), &expected)
+}
+
+/// Create the first superadmin from env config if none exists yet.
+pub async fn ensure_bootstrap_admin(pool: &sqlx::SqlitePool, email: &str, password: &str) {
+    let (count,): (i64,) = match sqlx::query_as(
+        "SELECT COUNT(*) FROM users WHERE role = 'superadmin'",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!(error = %e, "bootstrap admin check failed");
+            return;
+        }
+    };
+    if count > 0 {
+        return;
+    }
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
+         VALUES (?, ?, 'Platform Admin', ?, 'superadmin', NULL, 'active', ?)",
+    )
+    .bind(new_id("usr"))
+    .bind(email)
+    .bind(hash_password(password))
+    .bind(now_iso())
+    .execute(pool)
+    .await;
+    tracing::info!(email, "bootstrapped superadmin user");
+}
+
+// --- sessions ----------------------------------------------------------------
+
+/// Session token bound to the user's current password hash: changing a
+/// password (or disabling the user) invalidates their sessions.
+fn session_token(password_hash: &str, user_id: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(password_hash.as_bytes())
+        .expect("hmac accepts any key length");
+    mac.update(format!("{SESSION_DOMAIN}:{user_id}").as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Constant-time byte equality (session cookie, password, CSRF compares).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split("; ")
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('=').map(str::to_owned))
+}
+
+async fn session_info(state: &AppState, headers: &HeaderMap) -> Option<SessionInfo> {
+    let raw = read_cookie(headers, USER_COOKIE)?;
+    let (user_id, token) = raw.split_once('.')?;
+    let (password_hash, email, role, merchant_id): (String, String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT password_hash, email, role, merchant_id FROM users \
+             WHERE id = ? AND status = 'active'",
+        )
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()?;
+    let expected = session_token(&password_hash, user_id);
+    if !ct_eq(token.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    Some(SessionInfo {
+        user: CurrentUser { id: user_id.to_string(), email, role, merchant_id },
+        token: expected,
+    })
+}
+
+/// Gate for /admin: requires a session; merchant users are sent to /portal.
+pub async fn require_admin(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(session) = session_info(&state, req.headers()).await else {
+        return Redirect::to("/admin/login").into_response();
+    };
+    if session.user.role == "merchant" {
+        return Redirect::to("/portal").into_response();
+    }
+    req.extensions_mut().insert(session);
+    next.run(req).await
+}
+
+/// Gate for /portal: merchant-role users only.
+pub async fn require_merchant(
+    State(state): State<AppState>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let Some(session) = session_info(&state, req.headers()).await else {
+        return Redirect::to("/admin/login").into_response();
+    };
+    if session.user.role != "merchant" {
+        return Redirect::to("/admin").into_response();
+    }
+    req.extensions_mut().insert(session);
+    next.run(req).await
+}
+
+/// Double-submit CSRF: user forms carry the session token as a hidden field.
+fn csrf_ok(session: &SessionInfo, submitted: &str) -> bool {
+    !submitted.is_empty() && ct_eq(submitted.as_bytes(), session.token.as_bytes())
+}
+
+/// Best-effort client IP for the audit trail (in prod we sit behind TLS/proxy,
+/// so the forwarding headers carry the meaningful values).
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        })
+}
+
+async fn audit(
+    pool: &sqlx::SqlitePool,
+    actor: &str,
+    ip: Option<&str>,
+    action: &str,
+    resource: &str,
+    resource_id: &str,
+    metadata: Option<String>,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO audit_logs (id, actor, action, resource, resource_id, ip, metadata, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(new_id("aud"))
+    .bind(actor)
+    .bind(action)
+    .bind(resource)
+    .bind(resource_id)
+    .bind(ip)
+    .bind(metadata)
+    .bind(now_iso())
+    .execute(pool)
+    .await;
+}
+
+fn page(status: StatusCode, template: impl askama::Template) -> Response {
+    match template.render() {
+        Ok(html) => (status, Html(html)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin template render failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "admin page failed to render").into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
+
+/// `/admin/login` and `/signup` are public; everything else sits behind
+/// `require_admin` (platform roles) with per-action capability checks.
+pub fn router(state: AppState) -> Router<AppState> {
+    let protected = Router::new()
+        .route("/", get(dashboard))
+        .route("/merchants", get(merchants))
+        .route("/merchants/{merchant_id}", get(merchant_detail))
+        .route("/merchants/{merchant_id}/status", post(merchant_status))
+        .route("/merchants/{merchant_id}/approve", post(merchant_approve))
+        .route("/merchants/{merchant_id}/methods", post(method_create))
+        .route(
+            "/merchants/{merchant_id}/methods/{method_id}/status",
+            post(method_status),
+        )
+        .route(
+            "/merchants/{merchant_id}/methods/{method_id}/account",
+            post(method_account),
+        )
+        .route("/merchants/{merchant_id}/keys", post(key_create))
+        .route("/merchants/{merchant_id}/keys/{key_id}/revoke", post(key_revoke))
+        .route("/merchants/{merchant_id}/keys/{key_id}/rotate", post(key_rotate))
+        .route("/checkouts", get(checkouts))
+        .route("/checkouts/{checkout_id}", get(checkout_detail))
+        .route("/webhooks", get(webhooks))
+        .route("/webhooks/deliveries/{delivery_id}", get(delivery_detail))
+        .route(
+            "/webhooks/deliveries/{delivery_id}/retry",
+            post(delivery_retry),
+        )
+        .route("/users", get(users_page).post(user_create))
+        .route("/users/{user_id}/status", post(user_status))
+        .route("/audit", get(audit_page))
+        .route("/logout", post(logout))
+        .layer(middleware::from_fn_with_state(state.clone(), require_admin));
+
+    Router::new()
+        .route("/login", get(login_page).post(login_submit))
+        .merge(protected)
+}
+
+/// `/portal`: the merchant-user surface (own merchant data only).
+pub fn portal_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/", get(portal_home))
+        .layer(middleware::from_fn_with_state(state, require_merchant))
+}
+
+// ---------------------------------------------------------------------------
+// Login / logout / signup
+// ---------------------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "admin_login.html")]
+pub struct LoginPage {
+    pub error: bool,
+    /// Set after /signup: "account created, sign in to see approval status".
+    pub created: bool,
+}
+
+pub async fn login_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if session_info(&state, &headers).await.is_some() {
+        return Redirect::to("/admin").into_response();
+    }
+    page(
+        StatusCode::OK,
+        LoginPage {
+            error: false,
+            created: params.get("created").map(String::as_str) == Some("1"),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct LoginForm {
+    pub email: String,
+    pub password: String,
+}
+
+pub async fn login_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let ip = client_ip(&headers);
+    let email = form.email.trim().to_lowercase();
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, password_hash, role, email FROM users \
+         WHERE lower(email) = ? AND status = 'active'",
+    )
+    .bind(&email)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((user_id, password_hash, role, user_email)) = row else {
+        audit(&state.pool, &email, ip.as_deref(), "user.login_failed", "user", &email, None).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html(
+                LoginPage { error: true, created: false }
+                    .render()
+                    .unwrap_or_else(|_| "login failed".into()),
+            ),
+        )
+            .into_response();
+    };
+    if !verify_password(&form.password, &password_hash) {
+        audit(&state.pool, &email, ip.as_deref(), "user.login_failed", "user", &email, None).await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html(
+                LoginPage { error: true, created: false }
+                    .render()
+                    .unwrap_or_else(|_| "login failed".into()),
+            ),
+        )
+            .into_response();
+    }
+
+    let next = if role == "merchant" { "/portal" } else { "/admin" };
+    let cookie = format!(
+        "{USER_COOKIE}={user_id}.{}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200",
+        session_token(&password_hash, &user_id)
+    );
+    audit(&state.pool, &user_email, ip.as_deref(), "user.login", "user", &user_id, None).await;
+    (
+        StatusCode::SEE_OTHER,
+        [("set-cookie", cookie), ("location", next.to_string())],
+    )
+        .into_response()
+}
+
+pub async fn logout() -> Response {
+    let cookie = format!("{USER_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    (
+        StatusCode::SEE_OTHER,
+        [("set-cookie", cookie), ("location", "/admin/login".to_string())],
+    )
+        .into_response()
+}
+
+// --- merchant signup ---------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "signup.html")]
+pub struct SignupPage {
+    pub error: Option<String>,
+}
+
+pub async fn signup_page() -> Response {
+    page(StatusCode::OK, SignupPage { error: None })
+}
+
+#[derive(Deserialize)]
+pub struct SignupForm {
+    pub merchant_name: String,
+    pub name: String,
+    pub email: String,
+    pub password: String,
+}
+
+/// Merchant self-signup: creates a `pending` merchant plus its owner user
+/// (role `merchant`). A superadmin approves the merchant; until then the
+/// merchant fails API-key authentication.
+pub async fn signup_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SignupForm>,
+) -> Response {
+    let merchant_name = form.merchant_name.trim().to_string();
+    let name = form.name.trim().to_string();
+    let email = form.email.trim().to_lowercase();
+    let password = form.password.trim().to_string();
+
+    let error = |msg: &str| {
+        page(
+            StatusCode::BAD_REQUEST,
+            SignupPage { error: Some(msg.to_string()) },
+        )
+    };
+    if merchant_name.is_empty() {
+        return error("Business name is required.");
+    }
+    if !email.contains('@') || email.len() < 5 {
+        return error("Enter a valid email address.");
+    }
+    if password.len() < 8 {
+        return error("Password must be at least 8 characters.");
+    }
+    let (exists,): (i64,) = match sqlx::query_as(
+        "SELECT COUNT(*) FROM users WHERE lower(email) = ?",
+    )
+    .bind(&email)
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => return db_error(e),
+    };
+    if exists > 0 {
+        return error("This email is already registered — sign in instead.");
+    }
+
+    let merchant_id = new_id("mch");
+    let user_id = new_id("usr");
+    let mut db = match state.pool.begin().await {
+        Ok(db) => db,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = sqlx::query(
+        "INSERT INTO merchants (id, name, status, onboarding_status, created_at) \
+         VALUES (?, ?, 'active', 'pending', ?)",
+    )
+    .bind(&merchant_id)
+    .bind(&merchant_name)
+    .bind(now_iso())
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    if let Err(e) = sqlx::query(
+        "INSERT INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
+         VALUES (?, ?, ?, ?, 'merchant', ?, 'active', ?)",
+    )
+    .bind(&user_id)
+    .bind(&email)
+    .bind(&name)
+    .bind(hash_password(&password))
+    .bind(&merchant_id)
+    .bind(now_iso())
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    if let Err(e) = db.commit().await {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &email,
+        client_ip(&headers).as_deref(),
+        "merchant.signup",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"user\":\"{user_id}\"}}")),
+    )
+    .await;
+
+    Redirect::to("/admin/login?created=1").into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+pub struct RecentPayment {
+    pub checkout_id: String,
+    pub reference: String,
+    pub merchant: String,
+    pub amount_display: String,
+    pub status: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin_dashboard.html")]
+pub struct DashboardPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub today_total: i64,
+    pub today_succeeded: i64,
+    pub today_failed: i64,
+    pub volume_display: String,
+    pub pending: i64,
+    pub recent: Vec<RecentPayment>,
+}
+
+pub async fn dashboard(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    // ISO timestamps sort lexicographically, so ">= YYYY-MM-DD" is "today UTC".
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    let by_status: Vec<(String, i64, i64)> = match sqlx::query_as(
+        "SELECT status, COUNT(*), COALESCE(SUM(amount_minor), 0) \
+         FROM checkouts WHERE created_at >= ? GROUP BY status",
+    )
+    .bind(&today)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return db_error(e),
+    };
+
+    let mut today_total = 0i64;
+    let mut today_succeeded = 0i64;
+    let mut today_failed = 0i64;
+    let mut volume_minor = 0i64;
+    for (status, count, sum) in by_status {
+        today_total += count;
+        match status.as_str() {
+            "succeeded" => {
+                today_succeeded = count;
+                volume_minor = sum;
+            }
+            "failed" => today_failed = count,
+            _ => {}
+        }
+    }
+
+    let (pending,): (i64,) = match sqlx::query_as(
+        "SELECT COUNT(*) FROM checkouts WHERE status = 'pending'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => return db_error(e),
+    };
+
+    let recent = match sqlx::query_as::<
+        _,
+        (String, String, i64, String, String, String),
+    >(
+        "SELECT c.id, c.reference, c.amount_minor, c.currency, c.status, m.name \
+         FROM checkouts c JOIN merchants m ON m.id = c.merchant_id \
+         ORDER BY c.created_at DESC LIMIT 10",
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(id, reference, amount_minor, currency, status, merchant)| RecentPayment {
+                checkout_id: id,
+                amount_display: format!("{} {currency}", format_minor(amount_minor)),
+                reference,
+                merchant,
+                status,
+            })
+            .collect(),
+        Err(e) => return db_error(e),
+    };
+
+    page(
+        StatusCode::OK,
+        DashboardPage {
+            section: "dashboard",
+            csrf: sess.token,
+            today_total,
+            today_succeeded,
+            today_failed,
+            volume_display: format_minor(volume_minor),
+            pending,
+            recent,
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Merchants
+// ---------------------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "admin_merchants.html")]
+pub struct MerchantsPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub rows: Vec<MerchantRow>,
+}
+
+pub struct MerchantRow {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub onboarding: String,
+    pub checkout_count: i64,
+}
+
+pub async fn merchants(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    let rows = match sqlx::query_as::<_, (String, String, String, String, i64)>(
+        "SELECT m.id, m.name, m.status, m.onboarding_status, COUNT(c.id) \
+         FROM merchants m LEFT JOIN checkouts c ON c.merchant_id = m.id \
+         GROUP BY m.id, m.name, m.status, m.onboarding_status ORDER BY m.created_at",
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(id, name, status, onboarding, checkout_count)| MerchantRow {
+                id,
+                name,
+                status,
+                onboarding,
+                checkout_count,
+            })
+            .collect(),
+        Err(e) => return db_error(e),
+    };
+    page(
+        StatusCode::OK,
+        MerchantsPage { section: "merchants", csrf: sess.token, rows },
+    )
+}
+
+pub struct MerchantMethodRow {
+    pub method_id: String,
+    pub provider: String,
+    pub display_name: String,
+    pub account_identifier: String,
+    pub status: String,
+}
+
+pub struct MerchantKeyRow {
+    pub key_id: String,
+    pub prefix: String,
+    pub created_at: String,
+    pub active: bool,
+}
+
+pub struct MerchantEndpointRow {
+    pub url: String,
+    pub status: String,
+}
+
+pub struct MerchantCheckoutRow {
+    pub checkout_id: String,
+    pub reference: String,
+    pub amount_display: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin_merchant.html")]
+pub struct MerchantPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub merchant_id: String,
+    pub name: String,
+    pub status: String,
+    pub onboarding: String,
+    pub created_at: String,
+    pub methods: Vec<MerchantMethodRow>,
+    pub keys: Vec<MerchantKeyRow>,
+    pub endpoints: Vec<MerchantEndpointRow>,
+    pub checkouts: Vec<MerchantCheckoutRow>,
+    /// A freshly created API key, rendered exactly once (create/rotate).
+    pub new_key: Option<String>,
+    /// Selectable providers for the add-method form.
+    pub providers: Vec<(String, String)>,
+}
+
+pub async fn merchant_detail(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Path(merchant_id): Path<String>,
+) -> Response {
+    merchant_page(&state, &merchant_id, None, sess.token).await
+}
+
+async fn merchant_page(
+    state: &AppState,
+    merchant_id: &str,
+    new_key: Option<String>,
+    csrf: String,
+) -> Response {
+    let Some((name, status, onboarding, created_at)) = sqlx::query_as::<
+        _,
+        (String, String, String, String),
+    >(
+        "SELECT name, status, onboarding_status, created_at FROM merchants WHERE id = ?",
+    )
+    .bind(merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+
+    let methods = sqlx::query_as::<_, (String, String, String, String, String)>(
+        "SELECT id, provider, display_name, account_identifier, status \
+         FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(method_id, provider, display_name, account_identifier, status)| {
+                MerchantMethodRow {
+                    method_id,
+                    provider,
+                    display_name,
+                    account_identifier,
+                    status,
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let keys = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
+         WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(key_id, prefix, created_at, revoked_at)| MerchantKeyRow {
+                key_id,
+                prefix,
+                created_at,
+                active: revoked_at.is_none(),
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let endpoints = sqlx::query_as::<_, (String, String)>(
+        "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
+    )
+    .bind(merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(url, status)| MerchantEndpointRow { url, status })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let checkouts = sqlx::query_as::<_, (String, String, i64, String, String)>(
+        "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
+         WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
+    )
+    .bind(merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(id, reference, amount_minor, status, created_at)| MerchantCheckoutRow {
+                checkout_id: id,
+                reference,
+                amount_display: format_minor(amount_minor),
+                status,
+                created_at,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        MerchantPage {
+            section: "merchants",
+            csrf,
+            merchant_id: merchant_id.to_string(),
+            name,
+            status,
+            onboarding,
+            created_at,
+            methods,
+            keys,
+            endpoints,
+            checkouts,
+            new_key,
+            providers: PROVIDERS
+                .iter()
+                .map(|(p, n)| (p.to_string(), n.to_string()))
+                .collect(),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct MerchantStatusForm {
+    pub csrf: String,
+    pub action: String,
+}
+
+/// Suspend (disable) or reactivate a merchant. Suspended merchants fail API
+/// key authentication immediately (`m.status = 'active'` in auth.rs).
+pub async fn merchant_status(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(merchant_id): Path<String>,
+    Form(form): Form<MerchantStatusForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let next_status = match form.action.as_str() {
+        "suspend" => "disabled",
+        "reactivate" => "active",
+        _ => return bad_request("unknown action"),
+    };
+
+    if let Err(e) = sqlx::query("UPDATE merchants SET status = ? WHERE id = ?")
+        .bind(next_status)
+        .bind(&merchant_id)
+        .execute(&state.pool)
+        .await
+    {
+        return db_error(e);
+    }
+
+    let action = if next_status == "disabled" { "merchant.suspended" } else { "merchant.reactivated" };
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        action,
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"status\":\"{next_status}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ApproveForm {
+    pub csrf: String,
+}
+
+/// Approve a signed-up merchant (pending -> approved). Until approval the
+/// merchant's API keys fail authentication.
+pub async fn merchant_approve(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(merchant_id): Path<String>,
+    Form(form): Form<ApproveForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchants SET onboarding_status = 'approved' \
+         WHERE id = ? AND onboarding_status = 'pending'",
+    )
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "merchant.approved",
+        "merchant",
+        &merchant_id,
+        None,
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Merchant payment methods
+// ---------------------------------------------------------------------------
+
+const PROVIDERS: [(&str, &str); 4] = [
+    ("telebirr", "Telebirr"),
+    ("cbebirr", "CBE Birr"),
+    ("mpesa", "M-Pesa"),
+    ("awash", "Awash"),
+];
+
+const DEFAULT_INSTRUCTIONS: &str = "Send exactly the checkout amount to the account shown\n\
+    Copy the transaction reference from your wallet app\n\
+    Return to this page and paste the reference";
+
+#[derive(Deserialize)]
+pub struct MethodCreateForm {
+    pub csrf: String,
+    pub provider: String,
+    pub display_name: Option<String>,
+    pub account_identifier: String,
+    pub instructions: Option<String>,
+}
+
+/// Add a receiving account for the merchant. The account identifier is the
+/// exact-match target of the verification chain (recipient_mismatch), so it
+/// lives in platform configuration — never supplied per checkout.
+pub async fn method_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(merchant_id): Path<String>,
+    Form(form): Form<MethodCreateForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((_, default_name)) = PROVIDERS.iter().find(|(p, _)| *p == form.provider.as_str())
+    else {
+        return bad_request("unknown provider");
+    };
+    let account = form.account_identifier.trim().to_string();
+    if account.is_empty() {
+        return bad_request("receiving account is required");
+    }
+    let display_name = form
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_name)
+        .to_string();
+    let instructions = form
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_INSTRUCTIONS)
+        .to_string();
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO merchant_payment_methods \
+         (id, merchant_id, provider, display_name, account_identifier, instructions, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+    )
+    .bind(new_id("mpm"))
+    .bind(&merchant_id)
+    .bind(&form.provider)
+    .bind(&display_name)
+    .bind(&account)
+    .bind(&instructions)
+    .bind(now_iso())
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.added",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"provider\":\"{}\",\"account\":\"{account}\"}}", form.provider)),
+    )
+    .await;
+
+    merchant_page(&state, &merchant_id, None, sess.token).await
+}
+
+#[derive(Deserialize)]
+pub struct MethodStatusForm {
+    pub csrf: String,
+    pub action: String,
+}
+
+/// Enable/disable a payment method. Disabled methods disappear from the
+/// merchant's hosted checkout and cannot be newly selected.
+pub async fn method_status(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, method_id)): Path<(String, String)>,
+    Form(form): Form<MethodStatusForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let next_status = match form.action.as_str() {
+        "enable" => "active",
+        "disable" => "disabled",
+        _ => return bad_request("unknown action"),
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_payment_methods SET status = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(next_status)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    let action = if next_status == "active" { "payment_method.enabled" } else { "payment_method.disabled" };
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        action,
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"status\":\"{next_status}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MethodAccountForm {
+    pub csrf: String,
+    pub account_identifier: String,
+}
+
+/// Change the receiving wallet. Audited with the new value; the transactions
+/// table keeps the recipient that was matched at each payment's time.
+pub async fn method_account(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, method_id)): Path<(String, String)>,
+    Form(form): Form<MethodAccountForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let account = form.account_identifier.trim().to_string();
+    if account.is_empty() {
+        return bad_request("receiving account is required");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_payment_methods SET account_identifier = ? \
+         WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&account)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.account_changed",
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"account\":\"{account}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Merchant API keys
+// ---------------------------------------------------------------------------
+
+/// 160 bits of OS randomness via two ULIDs, on top of the `pb_sk_{kind}_`
+/// prefix so the kind stays visible in the stored lookup prefix.
+fn generate_api_key(kind: &str) -> String {
+    format!("pb_sk_{kind}_{}{}", ulid::Ulid::new(), ulid::Ulid::new())
+}
+
+async fn insert_api_key(
+    pool: &sqlx::SqlitePool,
+    merchant_id: &str,
+    kind: &str,
+) -> Result<String, sqlx::Error> {
+    let secret = generate_api_key(kind);
+    sqlx::query(
+        "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(new_id("key"))
+    .bind(merchant_id)
+    .bind(&secret[..12])
+    .bind(crate::auth::sha256_hex(&secret))
+    .bind(now_iso())
+    .execute(pool)
+    .await?;
+    Ok(secret)
+}
+
+#[derive(Deserialize)]
+pub struct KeyCreateForm {
+    pub csrf: String,
+    pub kind: String,
+}
+
+/// Create an API key. The full secret is rendered once on the resulting page
+/// (stored only as a SHA-256 hash + 12-char lookup prefix) and never again.
+pub async fn key_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(merchant_id): Path<String>,
+    Form(form): Form<KeyCreateForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageApiKeys) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    if !matches!(form.kind.as_str(), "test" | "live") {
+        return bad_request("kind must be test or live");
+    }
+
+    let secret = match insert_api_key(&state.pool, &merchant_id, &form.kind).await {
+        Ok(s) => s,
+        Err(e) => return db_error(e),
+    };
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.created",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"kind\":\"{}\",\"prefix\":\"{}\"}}", form.kind, &secret[..12])),
+    )
+    .await;
+
+    merchant_page(&state, &merchant_id, Some(secret), sess.token).await
+}
+
+#[derive(Deserialize)]
+pub struct KeyActionForm {
+    pub csrf: String,
+}
+
+/// Revoke a key: it stops authenticating immediately (revoked_at filter in
+/// auth.rs). The key row and audit trail remain for history.
+pub async fn key_revoke(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, key_id)): Path<(String, String)>,
+    Form(form): Form<KeyActionForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageApiKeys) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+
+    let prefix: Option<(String,)> = sqlx::query_as(
+        "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&key_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((prefix,)) = prefix else {
+        return not_found();
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_api_keys SET revoked_at = ? \
+         WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
+    )
+    .bind(now_iso())
+    .bind(&key_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.revoked",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"key\":\"{key_id}\",\"prefix\":\"{prefix}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
+}
+
+/// Rotate a key: revoke the old one and create a replacement in one action.
+/// The new secret is shown once; the old key dies immediately.
+pub async fn key_rotate(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, key_id)): Path<(String, String)>,
+    Form(form): Form<KeyActionForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageApiKeys) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+
+    let old: Option<(String, String)> = sqlx::query_as(
+        "SELECT prefix, created_at FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&key_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((old_prefix, old_created)) = old else {
+        return not_found();
+    };
+    // Preserve the kind (test/live) of the key being rotated.
+    let kind = old_prefix
+        .strip_prefix("pb_sk_")
+        .and_then(|rest| rest.split('_').next())
+        .unwrap_or("test")
+        .to_string();
+
+    let mut db = match state.pool.begin().await {
+        Ok(db) => db,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+    .bind(now_iso())
+    .bind(&key_id)
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    let new_secret = match insert_api_key_tx(&mut db, &merchant_id, &kind).await {
+        Ok(s) => s,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = db.commit().await {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.rotated",
+        "merchant",
+        &merchant_id,
+        Some(format!(
+            "{{\"key\":\"{key_id}\",\"old_prefix\":\"{old_prefix}\",\"new_prefix\":\"{}\",\"created\":\"{old_created}\"}}",
+            &new_secret[..12]
+        )),
+    )
+    .await;
+
+    merchant_page(&state, &merchant_id, Some(new_secret), sess.token).await
+}
+
+/// Same as `insert_api_key` but on an open transaction (used by rotate).
+async fn insert_api_key_tx(
+    db: &mut sqlx::SqliteConnection,
+    merchant_id: &str,
+    kind: &str,
+) -> Result<String, sqlx::Error> {
+    let secret = generate_api_key(kind);
+    sqlx::query(
+        "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(new_id("key"))
+    .bind(merchant_id)
+    .bind(&secret[..12])
+    .bind(crate::auth::sha256_hex(&secret))
+    .bind(now_iso())
+    .execute(db)
+    .await?;
+    Ok(secret)
+}
+
+// ---------------------------------------------------------------------------
+// Checkouts
+// ---------------------------------------------------------------------------
+
+pub struct CheckoutRow {
+    pub checkout_id: String,
+    pub reference: String,
+    pub merchant: String,
+    pub amount_display: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin_checkouts.html")]
+pub struct CheckoutsPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub rows: Vec<CheckoutRow>,
+    pub merchants: Vec<(String, String)>,
+    pub q: String,
+    pub status: String,
+    pub merchant: String,
+}
+
+#[derive(Deserialize)]
+pub struct CheckoutFilters {
+    pub q: Option<String>,
+    pub status: Option<String>,
+    pub merchant: Option<String>,
+}
+
+pub async fn checkouts(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Query(f): Query<CheckoutFilters>,
+) -> Response {
+    let merchants = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, name FROM merchants ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let q = f.q.unwrap_or_default().trim().to_string();
+    let status = f.status.unwrap_or_default();
+    let merchant = f.merchant.unwrap_or_default();
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, m.name \
+         FROM checkouts c JOIN merchants m ON m.id = c.merchant_id WHERE 1=1",
+    );
+    if matches!(status.as_str(), "created" | "pending" | "succeeded" | "failed" | "expired") {
+        qb.push(" AND c.status = ").push_bind(status.clone());
+    }
+    if !merchant.is_empty() {
+        qb.push(" AND c.merchant_id = ").push_bind(merchant.clone());
+    }
+    if !q.is_empty() {
+        let needle = format!("%{q}%");
+        qb.push(" AND (c.reference LIKE ")
+            .push_bind(needle.clone())
+            .push(" OR c.id LIKE ")
+            .push_bind(needle.clone())
+            .push(" OR EXISTS (SELECT 1 FROM payments p JOIN transactions t ON t.payment_id = p.id \
+                   WHERE p.checkout_id = c.id AND t.transaction_reference LIKE ")
+            .push_bind(needle)
+            .push("))");
+    }
+    qb.push(" ORDER BY c.created_at DESC LIMIT 50");
+
+    let rows = match qb
+        .build_query_as::<(String, String, i64, String, String, String)>()
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(id, reference, amount_minor, status, created_at, merchant)| CheckoutRow {
+                checkout_id: id,
+                reference,
+                amount_display: format_minor(amount_minor),
+                status,
+                created_at,
+                merchant,
+            })
+            .collect(),
+        Err(e) => return db_error(e),
+    };
+
+    page(
+        StatusCode::OK,
+        CheckoutsPage {
+            section: "checkouts",
+            csrf: sess.token,
+            rows,
+            merchants,
+            q,
+            status,
+            merchant,
+        },
+    )
+}
+
+pub struct AttemptRow {
+    pub outcome: String,
+    pub detail: Option<String>,
+    pub transaction_reference: String,
+    pub created_at: String,
+}
+
+pub struct DeliveryRow {
+    pub delivery_id: String,
+    pub attempt_no: i64,
+    pub status_code: Option<i64>,
+    pub error: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+}
+
+pub struct EventRow {
+    pub event_id: String,
+    pub event_type: String,
+    pub status: String,
+    pub attempts: i64,
+    pub next_attempt_at: String,
+    pub last_error: Option<String>,
+    pub payload: String,
+    pub deliveries: Vec<DeliveryRow>,
+}
+
+pub struct TransactionView {
+    pub reference: String,
+    pub amount_display: String,
+    pub currency: String,
+    pub recipient: String,
+    pub occurred_at: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin_checkout.html")]
+pub struct CheckoutPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub checkout_id: String,
+    pub reference: String,
+    pub merchant_id: String,
+    pub merchant: String,
+    pub amount_display: String,
+    pub currency: String,
+    pub status: String,
+    pub customer: String,
+    pub return_url: Option<String>,
+    pub method: Option<(String, String)>,
+    pub transaction: Option<TransactionView>,
+    pub created_at: String,
+    pub paid_at: Option<String>,
+    pub expires_at: String,
+    pub attempts: Vec<AttemptRow>,
+    pub events: Vec<EventRow>,
+}
+
+pub async fn checkout_detail(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Path(checkout_id): Path<String>,
+) -> Response {
+    let Some((
+        reference,
+        amount_minor,
+        currency,
+        status,
+        customer_name,
+        customer_email,
+        return_url,
+        expires_at,
+        created_at,
+        paid_at,
+        selected_method_id,
+        merchant,
+        merchant_id,
+    )) = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ),
+    >(
+        "SELECT c.reference, c.amount_minor, c.currency, c.status, c.customer_name, c.customer_email, \
+                c.return_url, c.expires_at, c.created_at, c.paid_at, c.selected_method_id, \
+                m.name, m.id \
+         FROM checkouts c JOIN merchants m ON m.id = c.merchant_id WHERE c.id = ?",
+    )
+    .bind(&checkout_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+
+    let method = match &selected_method_id {
+        Some(method_id) => sqlx::query_as::<_, (String, String)>(
+            "SELECT provider, display_name FROM merchant_payment_methods WHERE id = ?",
+        )
+        .bind(method_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten(),
+        None => None,
+    };
+
+    let transaction = sqlx::query_as::<_, (String, i64, String, String, String)>(
+        "SELECT t.transaction_reference, t.amount_minor, t.currency, t.recipient, t.occurred_at \
+         FROM transactions t JOIN payments p ON p.id = t.payment_id \
+         WHERE p.checkout_id = ? AND p.status = 'succeeded' \
+         ORDER BY t.created_at DESC LIMIT 1",
+    )
+    .bind(&checkout_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(reference, amount_minor, txn_currency, recipient, occurred_at)| TransactionView {
+        reference,
+        amount_display: format_minor(amount_minor),
+        currency: txn_currency,
+        recipient,
+        occurred_at,
+    });
+
+    let attempts = sqlx::query_as::<_, (String, Option<String>, String, String)>(
+        "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
+         WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(outcome, detail, transaction_reference, created_at)| AttemptRow {
+                outcome,
+                detail,
+                transaction_reference,
+                created_at,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let mut events: Vec<EventRow> = sqlx::query_as::<
+        _,
+        (String, String, String, i64, String, Option<String>, String),
+    >(
+        "SELECT id, event_type, status, attempts, next_attempt_at, last_error, payload \
+         FROM outbox_messages WHERE aggregate_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(id, event_type, ev_status, ev_attempts, next_attempt_at, last_error, payload)| {
+                EventRow {
+                    event_id: id.clone(),
+                    event_type,
+                    status: ev_status,
+                    attempts: ev_attempts,
+                    next_attempt_at,
+                    last_error,
+                    payload,
+                    deliveries: Vec::new(),
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    // All delivery attempts for this checkout's events, grouped per event.
+    let all_deliveries = sqlx::query_as::<
+        _,
+        (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
+    >(
+        "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
+         FROM webhook_deliveries d JOIN outbox_messages o ON o.id = d.outbox_id \
+         WHERE o.aggregate_id = ? ORDER BY d.attempt_no",
+    )
+    .bind(&checkout_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    for (outbox_id, delivery_id, attempt_no, status_code, error, duration_ms, created_at) in
+        all_deliveries
+    {
+        if let Some(event) = events.iter_mut().find(|e| e.event_id == outbox_id) {
+            event.deliveries.push(DeliveryRow {
+                delivery_id,
+                attempt_no,
+                status_code,
+                error,
+                duration_ms,
+                created_at,
+            });
+        }
+    }
+
+    let customer = [customer_name, customer_email]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+
+    page(
+        StatusCode::OK,
+        CheckoutPage {
+            section: "checkouts",
+            csrf: sess.token,
+            checkout_id,
+            reference,
+            merchant_id,
+            merchant,
+            amount_display: format_minor(amount_minor),
+            currency,
+            status,
+            customer,
+            return_url,
+            method,
+            transaction,
+            created_at,
+            paid_at,
+            expires_at,
+            attempts,
+            events,
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+pub struct EndpointRow {
+    pub endpoint_id: String,
+    pub merchant: String,
+    pub url: String,
+    pub status: String,
+}
+
+pub struct DeliveryListRow {
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub merchant: String,
+    pub attempt_no: i64,
+    pub status_code: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin_webhooks.html")]
+pub struct WebhooksPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub endpoints: Vec<EndpointRow>,
+    pub deliveries: Vec<DeliveryListRow>,
+}
+
+pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
+    let endpoints = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT e.id, m.name, e.url, e.status \
+         FROM webhook_endpoints e JOIN merchants m ON m.id = e.merchant_id \
+         ORDER BY m.name, e.created_at",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(endpoint_id, merchant, url, status)| EndpointRow {
+                endpoint_id,
+                merchant,
+                url,
+                status,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let deliveries = sqlx::query_as::<
+        _,
+        (String, String, String, String, i64, Option<i64>, Option<String>, String),
+    >(
+        "SELECT d.id, o.id, o.event_type, m.name, d.attempt_no, d.status_code, d.error, d.created_at \
+         FROM webhook_deliveries d \
+         JOIN outbox_messages o ON o.id = d.outbox_id \
+         JOIN webhook_endpoints e ON e.id = d.endpoint_id \
+         JOIN merchants m ON m.id = e.merchant_id \
+         ORDER BY d.created_at DESC LIMIT 50",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(delivery_id, event_id, event_type, merchant, attempt_no, status_code, error, created_at)| {
+                    DeliveryListRow {
+                        delivery_id,
+                        event_id,
+                        event_type,
+                        merchant,
+                        attempt_no,
+                        status_code,
+                        error,
+                        created_at,
+                    }
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        WebhooksPage {
+            section: "webhooks",
+            csrf: sess.token,
+            endpoints,
+            deliveries,
+        },
+    )
+}
+
+#[derive(Template)]
+#[template(path = "admin_delivery.html")]
+pub struct DeliveryPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub merchant: String,
+    pub url: String,
+    pub attempt_no: i64,
+    pub status_code: Option<i64>,
+    /// 2xx response on this attempt (drives the status badge).
+    pub ok: bool,
+    pub error: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+    pub event_status: String,
+    pub event_attempts: i64,
+    pub next_attempt_at: String,
+    pub last_error: Option<String>,
+    pub payload: String,
+    pub history: Vec<DeliveryRow>,
+}
+
+pub async fn delivery_detail(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    Path(delivery_id): Path<String>,
+) -> Response {
+    let Some((outbox_id, endpoint_id, attempt_no, status_code, error, duration_ms, created_at)) =
+        sqlx::query_as::<
+            _,
+            (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
+        >(
+            "SELECT outbox_id, endpoint_id, attempt_no, status_code, error, duration_ms, created_at \
+             FROM webhook_deliveries WHERE id = ?",
+        )
+        .bind(&delivery_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found();
+    };
+
+    let Some((event_type, event_status, event_attempts, next_attempt_at, last_error, payload)) =
+        sqlx::query_as::<_, (String, String, i64, String, Option<String>, String)>(
+            "SELECT event_type, status, attempts, next_attempt_at, last_error, payload \
+             FROM outbox_messages WHERE id = ?",
+        )
+        .bind(&outbox_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found();
+    };
+
+    let (merchant, url) = sqlx::query_as::<_, (String, String)>(
+        "SELECT m.name, e.url FROM webhook_endpoints e \
+         JOIN merchants m ON m.id = e.merchant_id WHERE e.id = ?",
+    )
+    .bind(&endpoint_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| ("?".into(), "?".into()));
+
+    let history = sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+        "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
+         FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
+    )
+    .bind(&outbox_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(delivery_id, attempt_no, status_code, error, duration_ms, created_at)| DeliveryRow {
+                    delivery_id,
+                    attempt_no,
+                    status_code,
+                    error,
+                    duration_ms,
+                    created_at,
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        DeliveryPage {
+            section: "webhooks",
+            csrf: sess.token,
+            delivery_id,
+            event_id: outbox_id,
+            event_type,
+            merchant,
+            url,
+            attempt_no,
+            ok: status_code.map(|c| (200..300).contains(&c)).unwrap_or(false),
+            status_code,
+            error,
+            duration_ms,
+            created_at,
+            event_status,
+            event_attempts,
+            next_attempt_at,
+            last_error,
+            payload,
+            history,
+        },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct RetryForm {
+    pub csrf: String,
+}
+
+/// Re-queue the delivery's event: the dispatcher delivers it on its next poll.
+/// Merchants dedupe on `eventId`, so redelivering a delivered event is safe.
+pub async fn delivery_retry(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+    Form(form): Form<RetryForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageWebhooks) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+
+    let Some((event_id,)): Option<(String,)> = sqlx::query_as(
+        "SELECT outbox_id FROM webhook_deliveries WHERE id = ?",
+    )
+    .bind(&delivery_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+
+    // One fresh attempt from the retry schedule; `now` makes the dispatcher
+    // pick it up on its next poll.
+    if let Err(e) = sqlx::query(
+        "UPDATE outbox_messages \
+         SET status = 'pending', attempts = MAX(attempts - 1, 0), next_attempt_at = ? \
+         WHERE id = ?",
+    )
+    .bind(now_iso())
+    .bind(&event_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "webhook.retried",
+        "webhook_event",
+        &event_id,
+        Some(format!("{{\"delivery\":\"{delivery_id}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/webhooks/deliveries/{delivery_id}")).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+pub struct AuditRow {
+    pub actor: String,
+    pub action: String,
+    pub resource: String,
+    pub resource_id: String,
+    pub ip: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin_audit.html")]
+pub struct AuditPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub rows: Vec<AuditRow>,
+}
+
+pub async fn audit_page(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, String, Option<String>, Option<String>, String),
+    >(
+        "SELECT actor, action, resource, resource_id, ip, metadata, created_at \
+         FROM audit_logs ORDER BY created_at DESC LIMIT 100",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(actor, action, resource, resource_id, ip, metadata, created_at)| AuditRow {
+                    actor,
+                    action,
+                    resource,
+                    resource_id,
+                    ip,
+                    metadata,
+                    created_at,
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        AuditPage { section: "audit", csrf: sess.token, rows },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// User management (superadmin only)
+// ---------------------------------------------------------------------------
+
+pub struct UserRow {
+    pub user_id: String,
+    pub email: String,
+    pub name: String,
+    pub role: String,
+    pub merchant: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin_users.html")]
+pub struct UsersPage {
+    pub section: &'static str,
+    pub csrf: String,
+    pub rows: Vec<UserRow>,
+    pub merchants: Vec<(String, String)>,
+}
+
+pub async fn users_page(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageUsers) {
+        return forbidden();
+    }
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, String, Option<String>, String, String),
+    >(
+        "SELECT u.id, u.email, u.name, u.role, m.name, u.status, u.created_at \
+         FROM users u LEFT JOIN merchants m ON m.id = u.merchant_id \
+         ORDER BY u.created_at DESC LIMIT 200",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(user_id, email, name, role, merchant, status, created_at)| UserRow {
+                    user_id,
+                    email,
+                    name,
+                    role,
+                    merchant,
+                    status,
+                    created_at,
+                },
+            )
+            .collect()
+    })
+    .unwrap_or_default();
+    let merchants = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, name FROM merchants ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        UsersPage { section: "users", csrf: sess.token, rows, merchants },
+    )
+}
+
+#[derive(Deserialize)]
+pub struct UserCreateForm {
+    pub csrf: String,
+    pub email: String,
+    pub name: String,
+    pub role: String,
+    pub password: String,
+    pub merchant_id: String,
+}
+
+pub async fn user_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<UserCreateForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageUsers) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+
+    let email = form.email.trim().to_lowercase();
+    let name = form.name.trim().to_string();
+    let password = form.password.trim().to_string();
+    if !email.contains('@') || email.len() < 5 {
+        return bad_request("valid email is required");
+    }
+    if password.len() < 8 {
+        return bad_request("password must be at least 8 characters");
+    }
+    if !matches!(
+        form.role.as_str(),
+        "superadmin" | "operations" | "support" | "developer" | "merchant"
+    ) {
+        return bad_request("unknown role");
+    }
+    let merchant_id = if form.role == "merchant" {
+        let id = form.merchant_id.trim().to_string();
+        if id.is_empty() {
+            return bad_request("merchant users must be assigned to a merchant");
+        }
+        Some(id)
+    } else {
+        None
+    };
+
+    let (exists,): (i64,) = match sqlx::query_as(
+        "SELECT COUNT(*) FROM users WHERE lower(email) = ?",
+    )
+    .bind(&email)
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => return db_error(e),
+    };
+    if exists > 0 {
+        return bad_request("email already registered");
+    }
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+    )
+    .bind(new_id("usr"))
+    .bind(&email)
+    .bind(&name)
+    .bind(hash_password(&password))
+    .bind(&form.role)
+    .bind(&merchant_id)
+    .bind(now_iso())
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "user.created",
+        "user",
+        &email,
+        Some(format!("{{\"role\":\"{}\"}}", form.role)),
+    )
+    .await;
+
+    Redirect::to("/admin/users").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct UserStatusForm {
+    pub csrf: String,
+    pub action: String,
+}
+
+pub async fn user_status(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Form(form): Form<UserStatusForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageUsers) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    if user_id == sess.user.id {
+        return bad_request("you cannot disable your own account");
+    }
+    let next_status = match form.action.as_str() {
+        "enable" => "active",
+        "disable" => "disabled",
+        _ => return bad_request("unknown action"),
+    };
+
+    if let Err(e) = sqlx::query("UPDATE users SET status = ? WHERE id = ?")
+        .bind(next_status)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await
+    {
+        return db_error(e);
+    }
+
+    let action = if next_status == "active" { "user.enabled" } else { "user.disabled" };
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        action,
+        "user",
+        &user_id,
+        None,
+    )
+    .await;
+
+    Redirect::to("/admin/users").into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Merchant portal (role = merchant)
+// ---------------------------------------------------------------------------
+
+pub struct PortalCheckoutRow {
+    pub checkout_id: String,
+    pub reference: String,
+    pub amount_display: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// Merchants buy verification credit in fixed packages (1 ETB = 1 credit).
+const CREDIT_PACKAGES: [i64; 3] = [100, 200, 500];
+/// The platform merchant that sells credit (seeded in migration 0005).
+const PLATFORM_MERCHANT_ID: &str = "mch_seed_paybridge";
+
+#[derive(Template)]
+#[template(path = "portal.html")]
+pub struct PortalPage {
+    pub csrf: String,
+    pub email: String,
+    pub merchant_name: String,
+    pub onboarding: String,
+    pub credits: i64,
+    pub packages: Vec<i64>,
+    pub checkouts: Vec<PortalCheckoutRow>,
+    pub keys: Vec<MerchantKeyRow>,
+    /// A freshly self-generated API key, rendered exactly once.
+    pub new_key: Option<String>,
+}
+
+/// Merchant home: own checkouts, own API keys (prefixes only), credit balance,
+/// and the buy-credit flow — scoped to the signed-in user's merchant_id.
+pub async fn portal_home(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+) -> Response {
+    let Some((merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let checkouts = sqlx::query_as::<_, (String, String, i64, String, String)>(
+        "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
+         WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(id, reference, amount_minor, status, created_at)| PortalCheckoutRow {
+                checkout_id: id,
+                reference,
+                amount_display: format_minor(amount_minor),
+                status,
+                created_at,
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let keys = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
+         WHERE merchant_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(key_id, prefix, created_at, revoked_at)| MerchantKeyRow {
+                key_id,
+                prefix,
+                created_at,
+                active: revoked_at.is_none(),
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+
+    page(
+        StatusCode::OK,
+        PortalPage {
+            csrf: sess.token,
+            email: sess.user.email,
+            merchant_name,
+            onboarding,
+            credits,
+            packages: CREDIT_PACKAGES.to_vec(),
+            checkouts,
+            keys,
+            new_key: None,
+        },
+    )
+}
+
+async fn portal_merchant(state: &AppState, sess: &SessionInfo) -> Option<(String, String, i64)> {
+    let merchant_id = sess.user.merchant_id.as_deref()?;
+    sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT name, onboarding_status, credit_balance FROM merchants WHERE id = ?",
+    )
+    .bind(merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+#[derive(Deserialize)]
+pub struct CreditsBuyForm {
+    pub csrf: String,
+    pub credits: i64,
+}
+
+/// Buy credit: creates a normal hosted checkout against the platform merchant
+/// (the merchant pays via wallet + transaction reference, verified by the same
+/// engine). Settling that checkout credits the buyer — see
+/// domain::consume_transaction.
+pub async fn credits_buy(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<CreditsBuyForm>,
+) -> Response {
+    if !CREDIT_PACKAGES.contains(&form.credits) {
+        return bad_request("choose a credit package");
+    }
+    let Some((_, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let merchant_id = sess.user.merchant_id.clone().unwrap_or_default();
+
+    let checkout_id = new_id("chk");
+    let amount_minor = form.credits * 100;
+    let now = now_iso();
+    let expires_at = crate::ids::to_iso(chrono::Utc::now() + chrono::Duration::hours(24));
+
+    let mut db = match state.pool.begin().await {
+        Ok(db) => db,
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = sqlx::query(
+        "INSERT INTO checkouts \
+         (id, merchant_id, reference, amount_minor, currency, status, return_url, expires_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 'ETB', 'created', ?, ?, ?, ?)",
+    )
+    .bind(&checkout_id)
+    .bind(PLATFORM_MERCHANT_ID)
+    .bind(format!("CREDITS-{merchant_id}"))
+    .bind(amount_minor)
+    .bind(format!("{}/portal", state.config.base_url))
+    .bind(&expires_at)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    if let Err(e) = sqlx::query(
+        "INSERT INTO credit_purchases (id, merchant_id, checkout_id, credits, amount_minor, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(new_id("crp"))
+    .bind(&merchant_id)
+    .bind(&checkout_id)
+    .bind(form.credits)
+    .bind(amount_minor)
+    .bind(&now)
+    .execute(&mut *db)
+    .await
+    {
+        return db_error(e);
+    }
+    if let Err(e) = db.commit().await {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "credits.purchase_started",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"credits\":{},\"checkout\":\"{checkout_id}\"}}", form.credits)),
+    )
+    .await;
+
+    Redirect::to(&format!("/c/{checkout_id}")).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PortalKeyForm {
+    pub csrf: String,
+}
+
+/// Self-serve API key: merchants with credit generate their own keys. The
+/// secret is shown once on the rendered portal page.
+pub async fn portal_key_generate(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<PortalKeyForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    if onboarding != "approved" || credits < 1 {
+        return bad_request("buy credit first — API keys are enabled once your account has credit");
+    }
+    let merchant_id = sess.user.merchant_id.clone().unwrap_or_default();
+    let secret = match insert_api_key(&state.pool, &merchant_id, "test").await {
+        Ok(s) => s,
+        Err(e) => return db_error(e),
+    };
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "api_key.created",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"kind\":\"test\",\"prefix\":\"{}\",\"self\":true}}", &secret[..12])),
+    )
+    .await;
+
+    let _ = merchant_name;
+    let page = portal_home(State(state), Extension(sess)).await;
+    // portal_home rendered without the secret; re-render with it.
+    page
+}
+
+// ---------------------------------------------------------------------------
+// Shared responses
+// ---------------------------------------------------------------------------
+
+fn db_error(e: sqlx::Error) -> Response {
+    tracing::error!(error = %e, "admin page: database error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Something went wrong. Check the server logs.",
+    )
+        .into_response()
+}
+
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, "Not found").into_response()
+}
+
+fn forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "Your role does not allow this action.",
+    )
+        .into_response()
+}
+
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, message.to_string()).into_response()
+}

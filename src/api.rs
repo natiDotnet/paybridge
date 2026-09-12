@@ -224,6 +224,15 @@ pub async fn create_checkout(
     headers: HeaderMap,
     Json(req): Json<CreateCheckoutRequest>,
 ) -> Result<Response, ApiError> {
+    // Prepaid model: at zero credits the merchant buys more before creating
+    // checkouts — never let a customer pay a checkout that cannot be verified.
+    if auth.credit_balance < 1 {
+        return Err(ApiError::payment_required(
+            "insufficient_credits",
+            "Your verification credit is exhausted. Buy more credit to continue.",
+        ));
+    }
+
     let parsed = parse_request(&req, &state.config)?;
 
     // Idempotent replay: same merchant + Idempotency-Key -> same checkout.

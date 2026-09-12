@@ -69,6 +69,8 @@ pub enum VerifyResult {
     TooManyAttempts,
     AttemptCooldown,
     ServiceUnavailable(String),
+    /// The merchant has no verification credit left; buy credit to resume.
+    InsufficientCredits,
 }
 
 /// Wallet identifiers are matched loosely on case/whitespace only.
@@ -98,6 +100,29 @@ pub async fn verify_checkout(
     let Some(method) = load_method(&state.pool, &method_id).await? else {
         return Ok(VerifyResult::MethodNotSelected);
     };
+
+    // Prepaid credits: every successful verification costs the merchant one
+    // credit. Credit-purchase checkouts (paid to the platform merchant) are
+    // exempt — they are how merchants top up in the first place.
+    let is_credit_purchase = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM credit_purchases WHERE checkout_id = ?",
+    )
+    .bind(&checkout.id)
+    .fetch_one(&state.pool)
+    .await?
+        .0
+        > 0;
+    if !is_credit_purchase {
+        let (balance,): (i64,) = sqlx::query_as(
+            "SELECT credit_balance FROM merchants WHERE id = ?",
+        )
+        .bind(&checkout.merchant_id)
+        .fetch_one(&state.pool)
+        .await?;
+        if balance < 1 {
+            return Ok(VerifyResult::InsufficientCredits);
+        }
+    }
 
     // Rate limits: total *real* attempts per checkout (verification-service
     // outages are never charged against the customer) and a small cooldown.
@@ -211,7 +236,16 @@ pub async fn verify_checkout(
                             VerifyResult::Failed { reason: "transaction_too_old", detail: None },
                         )
                     } else {
-                        match consume_transaction(state, &checkout, &method, &payment_id, &tx).await {
+                        match consume_transaction(
+                            state,
+                            &checkout,
+                            &method,
+                            &payment_id,
+                            &tx,
+                            is_credit_purchase,
+                        )
+                        .await
+                        {
                             Ok(occurred_at) => (
                                 "succeeded",
                                 None,
@@ -225,6 +259,12 @@ pub async fn verify_checkout(
                                 None,
                                 VerifyResult::AlreadyUsed,
                             ),
+                            Err(ConsumeError::NoCredits) => {
+                                mark_payment_failed(&state.pool, &payment_id).await?;
+                                // Raced to zero between the gate and the
+                                // consume; report without an attempt record.
+                                return Ok(VerifyResult::InsufficientCredits);
+                            }
                             Err(ConsumeError::LostRace) => {
                                 mark_payment_failed(&state.pool, &payment_id).await?;
                                 let current = load_checkout(&state.pool, &checkout.id)
@@ -278,19 +318,24 @@ async fn mark_payment_failed(pool: &SqlitePool, payment_id: &str) -> Result<(), 
 
 enum ConsumeError {
     AlreadyUsed,
+    NoCredits,
     LostRace,
     Db(sqlx::Error),
 }
 
 /// Atomically: insert the consumed transaction (UNIQUE guard against reuse),
 /// flip the checkout to `succeeded` (guarded so only one winner), close the
-/// payment, and enqueue the webhook event. Anything failing rolls back all of it.
+/// payment, enqueue the webhook event, and settle credits — merchants pay one
+/// credit per successful verification, and credit-purchase checkouts top the
+/// buyer up (and activate them) in the very same transaction. Anything
+/// failing rolls back all of it.
 async fn consume_transaction(
     state: &AppState,
     checkout: &CheckoutRow,
     method: &MethodRow,
     payment_id: &str,
     tx: &VerifiedTransaction,
+    is_credit_purchase: bool,
 ) -> Result<String, ConsumeError> {
     let occurred_at = to_iso(tx.occurred_at);
     let event_id = new_id("evt");
@@ -368,6 +413,64 @@ async fn consume_transaction(
     .execute(&mut *db)
     .await
     .map_err(ConsumeError::Db)?;
+
+    if is_credit_purchase {
+        // The buyer paid the platform wallet: credit their account and
+        // activate the merchant — atomically with the checkout success.
+        let (buyer_id, credits): (String, i64) = sqlx::query_as(
+            "SELECT merchant_id, credits FROM credit_purchases WHERE checkout_id = ?",
+        )
+        .bind(&checkout.id)
+        .fetch_one(&mut *db)
+        .await
+        .map_err(ConsumeError::Db)?;
+        sqlx::query(
+            "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
+             VALUES (?, ?, ?, 'purchase', ?, ?)",
+        )
+        .bind(new_id("crl"))
+        .bind(&buyer_id)
+        .bind(credits)
+        .bind(&checkout.id)
+        .bind(now_iso())
+        .execute(&mut *db)
+        .await
+        .map_err(ConsumeError::Db)?;
+        sqlx::query(
+            "UPDATE merchants SET credit_balance = credit_balance + ?, onboarding_status = 'approved' \
+             WHERE id = ?",
+        )
+        .bind(credits)
+        .bind(&buyer_id)
+        .execute(&mut *db)
+        .await
+        .map_err(ConsumeError::Db)?;
+    } else {
+        // One credit per successful verification; the > 0 guard rolls the
+        // whole transaction back if credits ran out under us.
+        let charged = sqlx::query(
+            "UPDATE merchants SET credit_balance = credit_balance - 1 \
+             WHERE id = ? AND credit_balance > 0",
+        )
+        .bind(&checkout.merchant_id)
+        .execute(&mut *db)
+        .await
+        .map_err(ConsumeError::Db)?;
+        if charged.rows_affected() == 0 {
+            return Err(ConsumeError::NoCredits);
+        }
+        sqlx::query(
+            "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
+             VALUES (?, ?, -1, 'verification', ?, ?)",
+        )
+        .bind(new_id("crl"))
+        .bind(&checkout.merchant_id)
+        .bind(&checkout.id)
+        .bind(now_iso())
+        .execute(&mut *db)
+        .await
+        .map_err(ConsumeError::Db)?;
+    }
 
     db.commit().await.map_err(ConsumeError::Db)?;
 

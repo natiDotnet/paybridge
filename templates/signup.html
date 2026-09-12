@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Merchant signup — PayBridge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #0f172a; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 20px;
+    }
+    .card {
+      background: #fff; border-radius: 16px; padding: 32px; width: 100%; max-width: 420px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.35);
+    }
+    .logo { font-size: 17px; font-weight: 700; }
+    .logo b { color: #047857; }
+    p.sub { font-size: 13px; color: #6b7280; margin: 6px 0 22px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+    input {
+      width: 100%; border: 1.5px solid #e5e7eb; border-radius: 10px;
+      padding: 12px 14px; font-size: 15px; margin-top: 5px;
+    }
+    input:focus { outline: none; border-color: #047857; }
+    button {
+      width: 100%; margin-top: 8px; background: #047857; color: #fff; border: 0;
+      border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 700; cursor: pointer;
+    }
+    button:hover { background: #065f46; }
+    .error {
+      background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+      border-radius: 10px; padding: 10px 12px; font-size: 13px; margin-bottom: 14px;
+    }
+    .foot { margin-top: 18px; font-size: 13px; color: #6b7280; }
+    .foot a { color: #047857; font-weight: 600; }
+    .note { font-size: 12.5px; color: #6b7280; margin-top: 12px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">PayBridge <b>Merchant signup</b></div>
+    <p class="sub">Create your merchant account and start collecting wallet payments.</p>
+    {% match error %}{% when Some with (msg) %}<div class="error">{{ msg }}</div>{% when None %}{% endmatch %}
+    <form method="post" action="/signup">
+      <label>Business name
+        <input type="text" name="merchant_name" placeholder="Acme Tickets" required />
+      </label>
+      <label>Your name
+        <input type="text" name="name" placeholder="Jane Doe" required />
+      </label>
+      <label>Email
+        <input type="email" name="email" autocomplete="username" required />
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="new-password" minlength="8" required />
+      </label>
+      <button type="submit">Create account</button>
+    </form>
+    <p class="note">New merchants start in <b>pending</b> status. Once the PayBridge team approves
+    your account you can configure payment methods and receive API keys.</p>
+    <p class="foot">Already registered? <a href="/admin/login">Sign in</a></p>
+  </div>
+</body>
+</html>

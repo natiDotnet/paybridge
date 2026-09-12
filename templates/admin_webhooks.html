@@ -1,0 +1,45 @@
+{% extends "admin_base.html" %}
+{% block title %}Webhooks{% endblock %}
+{% block content %}
+<h1>Webhooks</h1>
+
+<p class="section-label">Endpoints</p>
+<div class="card">
+  {% if endpoints.is_empty() %}
+  <p class="empty">No webhook endpoints configured.</p>
+  {% else %}
+  <table>
+    <tr><th>Merchant</th><th>URL</th><th>Status</th></tr>
+    {% for e in endpoints %}
+    <tr>
+      <td>{{ e.merchant }}</td>
+      <td class="id">{{ e.url }}</td>
+      <td><span class="st st-{{ e.status }}">{{ e.status }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<p class="section-label">Recent deliveries</p>
+<div class="card">
+  {% if deliveries.is_empty() %}
+  <p class="empty">No webhook deliveries yet.</p>
+  {% else %}
+  <table>
+    <tr><th>Delivery</th><th>Event</th><th>Merchant</th><th class="num">Attempt</th><th class="num">Response</th><th>Error</th><th>At</th></tr>
+    {% for d in deliveries %}
+    <tr>
+      <td><a href="/admin/webhooks/deliveries/{{ d.delivery_id }}">{{ d.delivery_id }}</a></td>
+      <td>{{ d.event_type }}<br /><span class="id">{{ d.event_id }}</span></td>
+      <td>{{ d.merchant }}</td>
+      <td class="num">#{{ d.attempt_no }}</td>
+      <td class="num">{% match d.status_code %}{% when Some with (code) %}{{ code }}{% when None %}&mdash;{% endmatch %}</td>
+      <td>{% match d.error %}{% when Some with (err) %}{{ err }}{% when None %}&mdash;{% endmatch %}</td>
+      <td>{{ d.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}
