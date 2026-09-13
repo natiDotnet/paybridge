@@ -101,6 +101,11 @@ pub async fn verify_checkout(
         return Ok(VerifyResult::MethodNotSelected);
     };
 
+    // The customer may paste the whole payment notification instead of the
+    // bare reference — reduce it to the reference for this provider. Whatever
+    // comes out is what gets verified and recorded.
+    let reference = crate::extract::extract_reference(&method.provider, reference);
+
     // Prepaid credits: every successful verification costs the merchant one
     // credit. Credit-purchase checkouts (paid to the platform merchant) are
     // exempt — they are how merchants top up in the first place.
@@ -169,7 +174,7 @@ pub async fn verify_checkout(
 
     let query = VerifyQuery {
         provider: &method.provider,
-        reference,
+        reference: &reference,
         expected_amount_minor: checkout.amount_minor,
         expected_currency: &checkout.currency,
         expected_recipient: &method.account_identifier,

@@ -122,8 +122,8 @@ async fn full_checkout_flow() {
     assert_eq!(body["status"], "failed");
     assert_eq!(body["reason"], "amount_mismatch");
 
-    // --- 5. good reference succeeds ---------------------------------------------
-    let (status, body) = verify(&app, &checkout_id, "FT1").await;
+    // --- 5. good reference succeeds (pasted as a notification message) ----------
+    let (status, body) = verify(&app, &checkout_id, "Payment confirmed. Transaction ID: FT12345678901").await;
     assert_eq!(status, StatusCode::OK, "good ref: {body}");
     assert_eq!(body["status"], "succeeded");
 
@@ -138,7 +138,7 @@ async fn full_checkout_flow() {
     )
     .await;
     assert_eq!(detail["status"], "succeeded");
-    assert_eq!(detail["transactionReference"], "FT1");
+    assert_eq!(detail["transactionReference"], "FT12345678901");
     assert_eq!(detail["paymentMethod"]["provider"], "telebirr");
 
     // --- 5b. lookup by merchant reference and by transaction reference ----------
@@ -154,13 +154,13 @@ async fn full_checkout_flow() {
     .await;
     assert_eq!(status, StatusCode::OK, "by reference: {body}");
     assert_eq!(body["checkoutId"], json!(checkout_id));
-    assert_eq!(body["transactionReference"], "FT1");
+    assert_eq!(body["transactionReference"], "FT12345678901");
 
     let (status, body) = call(
         &app,
         request(
             "GET",
-            "/api/v1/checkouts/transaction/FT1",
+            "/api/v1/checkouts/transaction/FT12345678901",
             merchant_headers(None),
             None,
         ),
@@ -208,7 +208,7 @@ async fn full_checkout_flow() {
     assert_eq!(body["reason"], "transaction_too_old");
 
     // The reference that paid checkout 1 cannot pay checkout 2.
-    let (status, body) = verify(&app, &checkout2, "FT1").await;
+    let (status, body) = verify(&app, &checkout2, "FT12345678901").await;
     assert_eq!(status, StatusCode::CONFLICT, "reuse: {body}");
     assert_eq!(body["error"], "transaction_already_used");
 
@@ -229,7 +229,7 @@ async fn full_checkout_flow() {
     assert_eq!(payload_json["reference"], "ORDER-1");
     assert_eq!(payload_json["amount"], "500.00");
     assert_eq!(payload_json["amountMinor"], 50000);
-    assert_eq!(payload_json["transactionReference"], "FT1");
+    assert_eq!(payload_json["transactionReference"], "FT12345678901");
 
     let (outbox_status,): (String,) = sqlx::query_as(
         "SELECT status FROM outbox_messages WHERE aggregate_id = ? AND id = ?",

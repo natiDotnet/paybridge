@@ -298,6 +298,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             post(method_account),
         )
         .route(
+            "/merchants/{merchant_id}/methods/{method_id}/name",
+            post(method_name),
+        )
+        .route(
             "/merchants/{merchant_id}/methods/{method_id}/instructions",
             post(method_instructions),
         )
@@ -346,6 +350,7 @@ pub fn portal_router(state: AppState) -> Router<AppState> {
         .route("/methods", get(portal_methods_page).post(portal_method_create))
         .route("/methods/{method_id}/status", post(portal_method_status))
         .route("/methods/{method_id}/account", post(portal_method_account))
+        .route("/methods/{method_id}/name", post(portal_method_name))
         .route("/credits", get(portal_credits_page))
         .route("/credits/buy", post(credits_buy))
         .layer(middleware::from_fn_with_state(state, require_merchant))
@@ -1116,11 +1121,14 @@ pub async fn credits_grant(
 // Merchant payment methods
 // ---------------------------------------------------------------------------
 
-const PROVIDERS: [(&str, &str); 4] = [
+const PROVIDERS: [(&str, &str); 7] = [
     ("telebirr", "Telebirr"),
-    ("cbebirr", "CBE Birr"),
-    ("mpesa", "M-Pesa"),
+    ("cbe", "CBE Birr"),
+    ("boa", "Bank of Abyssinia"),
+    ("zemen", "Zemen Bank"),
+    ("dashen", "Dashen Bank"),
     ("awash", "Awash"),
+    ("mpesa", "M-Pesa"),
 ];
 
 const DEFAULT_INSTRUCTIONS: &str = "Send exactly the checkout amount to the account shown\n\
@@ -1330,6 +1338,58 @@ pub async fn method_account(
 pub struct MethodInstructionsForm {
     pub csrf: String,
     pub instructions: String,
+}
+
+#[derive(Deserialize)]
+pub struct MethodNameForm {
+    pub csrf: String,
+    pub display_name: String,
+}
+
+/// Rename a payment method — the display name shown to customers on the
+/// checkout (never the provider name unless the merchant chooses it).
+pub async fn method_name(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path((merchant_id, method_id)): Path<(String, String)>,
+    Form(form): Form<MethodNameForm>,
+) -> Response {
+    if !can(&sess.user.role, &Cap::ManageMerchants) {
+        return forbidden();
+    }
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let name = form.display_name.trim().to_string();
+    if name.is_empty() || name.len() > 60 {
+        return bad_request("display name must be 1-60 characters");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE merchant_payment_methods SET display_name = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&name)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.renamed",
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"name\":\"{name}\"}}")),
+    )
+    .await;
+
+    Redirect::to(&format!("/admin/merchants/{merchant_id}")).into_response()
 }
 
 /// Edit the customer-facing steps of a method (central config; merchants see
@@ -3886,6 +3946,61 @@ pub async fn portal_method_account(
         "payment_method",
         &method_id,
         Some(format!("{{\"merchant\":\"{merchant_id}\",\"account\":\"{account}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to("/portal/methods").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PortalMethodNameForm {
+    pub csrf: String,
+    pub display_name: String,
+}
+
+/// Rename one of the merchant's own methods — this is the name customers see
+/// on the checkout ("yaya", "Acme Telebirr", …), independent of the provider.
+pub async fn portal_method_name(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(method_id): Path<String>,
+    Form(form): Form<PortalMethodNameForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let name = form.display_name.trim().to_string();
+    if name.is_empty() || name.len() > 60 {
+        return bad_request("display name must be 1-60 characters");
+    }
+
+    let updated = sqlx::query(
+        "UPDATE merchant_payment_methods SET display_name = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&name)
+    .bind(&method_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await;
+    let Ok(updated) = updated else {
+        return db_error(updated.err().unwrap());
+    };
+    if updated.rows_affected() == 0 {
+        return not_found();
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_method.renamed",
+        "payment_method",
+        &method_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"name\":\"{name}\",\"self\":true}}")),
     )
     .await;
 

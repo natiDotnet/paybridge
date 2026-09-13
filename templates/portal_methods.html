@@ -13,7 +13,14 @@
     {% for m in methods %}
     <tr>
       <td>{{ m.provider }}<br /><span class="id">{{ m.method_id }}</span></td>
-      <td>{{ m.display_name }}</td>
+      <td>
+        <form class="inline" method="post" action="/portal/methods/{{ m.method_id }}/name">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <input type="text" name="display_name" value="{{ m.display_name }}" maxlength="60"
+                 style="border:1.5px solid var(--line);border-radius:9px;padding:7px 9px;font-size:13px;width:130px" />
+          <button class="act" type="submit">Save</button>
+        </form>
+      </td>
       <td>
         <form class="inline" method="post" action="/portal/methods/{{ m.method_id }}/account">
           <input type="hidden" name="csrf" value="{{ csrf }}" />

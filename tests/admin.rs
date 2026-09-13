@@ -431,7 +431,7 @@ async fn merchant_management() {
         post(
             &format!("/admin/merchants/{MERCHANT}/methods"),
             &format!(
-                "csrf={csrf}&provider=cbebirr&display_name=&account_identifier=1000123456789&instructions="
+                "csrf={csrf}&provider=cbe&display_name=&account_identifier=1000123456789&instructions="
             ),
             "application/x-www-form-urlencoded",
             Some(&cookie_pair),
@@ -444,7 +444,7 @@ async fn merchant_management() {
 
     let (method_id, method_status): (String, String) = sqlx::query_as(
         "SELECT id, status FROM merchant_payment_methods \
-         WHERE merchant_id = ? AND provider = 'cbebirr'",
+         WHERE merchant_id = ? AND provider = 'cbe'",
     )
     .bind(MERCHANT)
     .fetch_one(&pool)
@@ -1152,7 +1152,7 @@ async fn portal_scoping() {
         &app,
         post(
             "/portal/methods",
-            &format!("csrf={owner_csrf}&provider=cbebirr&display_name=&account_identifier=10001112222"),
+            &format!("csrf={owner_csrf}&provider=cbe&display_name=&account_identifier=10001112222"),
             "application/x-www-form-urlencoded",
             Some(&owner_cookie),
         ),
@@ -1162,7 +1162,7 @@ async fn portal_scoping() {
 
     let (instructions, method_status): (String, String) = sqlx::query_as(
         "SELECT instructions, status FROM merchant_payment_methods \
-         WHERE merchant_id = ? AND provider = 'cbebirr'",
+         WHERE merchant_id = ? AND provider = 'cbe'",
     )
     .bind(MERCHANT)
     .fetch_one(&pool)
@@ -1173,7 +1173,7 @@ async fn portal_scoping() {
 
     // Admin edits the steps; merchant cannot.
     let (method_id,): (String,) = sqlx::query_as(
-        "SELECT id FROM merchant_payment_methods WHERE merchant_id = ? AND provider = 'cbebirr'",
+        "SELECT id FROM merchant_payment_methods WHERE merchant_id = ? AND provider = 'cbe'",
     )
     .bind(MERCHANT)
     .fetch_one(&pool)
@@ -1213,4 +1213,37 @@ async fn portal_scoping() {
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(headers["location"], "/portal", "merchant bounced out of /admin");
+
+    // --- new providers: BoA via the portal, Dashen straight into the CHECK --------
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/methods",
+            &format!("csrf={owner_csrf}&provider=boa&display_name=&account_identifier=8877665544"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "BoA method via portal");
+    let (boa_instructions,): (String,) = sqlx::query_as(
+        "SELECT instructions FROM merchant_payment_methods WHERE merchant_id = ? AND provider = 'boa'",
+    )
+    .bind(MERCHANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        boa_instructions.contains("Bank of Abyssinia"),
+        "steps from platform config: {boa_instructions}"
+    );
+
+    sqlx::query(
+        "INSERT INTO merchant_payment_methods (id, merchant_id, provider, display_name, account_identifier, instructions, status, created_at) VALUES ('mpm_dashen_test', ?, 'dashen', 'Dashen', '1000200300', 'steps', 'active', ?)",
+    )
+    .bind(MERCHANT)
+    .bind(paybridge::ids::now_iso())
+    .execute(&pool)
+    .await
+    .unwrap();
 }

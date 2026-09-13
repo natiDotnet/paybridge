@@ -104,6 +104,35 @@ pub struct MethodView {
     pub display_name: String,
     pub account_identifier: String,
     pub instruction_lines: Vec<String>,
+    /// `/static/pay/{provider}/logo.svg` when a logo file exists; buttons fall
+    /// back to a letter badge without one.
+    pub logo_url: Option<String>,
+}
+
+fn logo_in_dir(static_dir: &std::path::Path, dir: &str) -> Option<String> {
+    for ext in ["svg", "png", "webp", "jpg"] {
+        let path = static_dir.join("pay").join(dir).join(format!("logo.{ext}"));
+        if path.is_file() {
+            return Some(format!("/static/pay/{dir}/logo.{ext}"));
+        }
+    }
+    None
+}
+
+/// Logo file convention: `static/pay/{provider}/logo.{svg,png,webp,jpg}` —
+/// drop a file in to brand a provider, no code change. Legacy provider ids
+/// fall back to their canonical directory ('cbebirr' → 'cbe').
+fn logo_for(static_dir: &std::path::Path, provider: &str) -> Option<String> {
+    if !provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    if provider == "cbebirr" {
+        if let Some(url) = logo_in_dir(static_dir, "cbebirr") {
+            return Some(url);
+        }
+        return logo_in_dir(static_dir, "cbe");
+    }
+    logo_in_dir(static_dir, provider)
 }
 
 /// Load `static/pay/{provider}/slides.json` — a list of
@@ -252,10 +281,29 @@ pub async fn checkout_page(
                         display_name,
                         account_identifier: String::new(),
                         instruction_lines: Vec::new(),
+                        logo_url: None,
                     })
                     .collect();
             }
             Err(e) => return db_error_page(e),
+        }
+    }
+    // Provider logos come from the static dir, keyed by the method's provider.
+    if show_methods {
+        let provider_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, provider FROM merchant_payment_methods \
+             WHERE merchant_id = ? AND status = 'active' ORDER BY created_at",
+        )
+        .bind(&checkout.merchant_id)
+        .fetch_all(&state.pool)
+        .await;
+        if let Ok(rows) = provider_rows {
+            for (id, provider) in rows {
+                let logo = logo_for(&state.config.static_dir, &provider);
+                if let Some(m) = methods.iter_mut().find(|m| m.id == id) {
+                    m.logo_url = logo;
+                }
+            }
         }
     }
 
@@ -264,11 +312,13 @@ pub async fn checkout_page(
     if let Some(method_id) = &checkout.selected_method_id {
         if let Ok(Some(m)) = domain::load_method(&state.pool, method_id).await {
             slides = load_slides(&state.config.static_dir, &m.provider);
+            let logo_url = logo_for(&state.config.static_dir, &m.provider);
             selected = Some(MethodView {
                 id: m.id,
                 display_name: m.display_name,
                 account_identifier: m.account_identifier,
                 instruction_lines: m.instructions.lines().map(str::to_string).collect(),
+                logo_url,
             });
         }
     }

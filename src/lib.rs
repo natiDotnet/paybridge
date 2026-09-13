@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod docs;
+pub mod extract;
 pub mod error;
 pub mod hosted;
 pub mod ids;
