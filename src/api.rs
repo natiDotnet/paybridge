@@ -336,6 +336,85 @@ pub async fn create_checkout(
     Ok((StatusCode::CREATED, Json(dto)).into_response())
 }
 
+/// Look up a checkout by the merchant's own `reference` (the value passed at
+/// creation). Returns the most recent checkout with that reference.
+#[utoipa::path(
+    get,
+    path = "/api/v1/checkouts/reference/{reference}",
+    tag = "checkouts",
+    params(
+        ("reference" = String, Path, description = "The merchant-side reference passed at creation")
+    ),
+    responses(
+        (status = 200, description = "The most recent checkout with this reference", body = CheckoutDto),
+        (status = 401, description = "Invalid or missing API key", body = crate::docs::ErrorResponse),
+        (status = 404, description = "No checkout with this reference for this merchant", body = crate::docs::ErrorResponse),
+    )
+)]
+pub async fn get_checkout_by_reference(
+    State(state): State<AppState>,
+    auth: MerchantAuth,
+    Path(reference): Path<String>,
+) -> Result<Json<CheckoutDto>, ApiError> {
+    let reference = reference.trim();
+    let (checkout_id,): (String,) = sqlx::query_as(
+        "SELECT id FROM checkouts \
+         WHERE merchant_id = ? AND reference = ? \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&auth.merchant_id)
+    .bind(reference)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("checkout not found"))?;
+
+    load_checkout_dto(&state, &checkout_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("checkout not found"))
+}
+
+/// Look up a checkout by the wallet **transaction reference** the customer
+/// entered (the value that was verified). Only checkouts owned by the
+/// authenticated merchant are visible.
+#[utoipa::path(
+    get,
+    path = "/api/v1/checkouts/transaction/{transaction_reference}",
+    tag = "checkouts",
+    params(
+        ("transaction_reference" = String, Path, description = "The wallet transaction reference that was verified")
+    ),
+    responses(
+        (status = 200, description = "The checkout this transaction paid", body = CheckoutDto),
+        (status = 401, description = "Invalid or missing API key", body = crate::docs::ErrorResponse),
+        (status = 404, description = "No verified transaction with this reference for this merchant", body = crate::docs::ErrorResponse),
+    )
+)]
+pub async fn get_checkout_by_transaction(
+    State(state): State<AppState>,
+    auth: MerchantAuth,
+    Path(transaction_reference): Path<String>,
+) -> Result<Json<CheckoutDto>, ApiError> {
+    let transaction_reference = transaction_reference.trim();
+    let (checkout_id,): (String,) = sqlx::query_as(
+        "SELECT c.id FROM checkouts c \
+         JOIN payments p ON p.checkout_id = c.id \
+         JOIN transactions t ON t.payment_id = p.id \
+         WHERE t.transaction_reference = ? AND c.merchant_id = ? \
+         ORDER BY t.created_at DESC LIMIT 1",
+    )
+    .bind(transaction_reference)
+    .bind(&auth.merchant_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("checkout not found"))?;
+
+    load_checkout_dto(&state, &checkout_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("checkout not found"))
+}
+
 /// Inspect a checkout: current status, selected payment method, and the
 /// consumed `transactionReference` once it is paid.
 #[utoipa::path(

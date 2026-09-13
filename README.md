@@ -71,6 +71,8 @@ reference on another checkout returns `transaction_already_used` (409).
 | --- | --- | --- | --- |
 | POST | `/api/v1/checkouts` | API key | Create checkout (`Idempotency-Key` supported) |
 | GET | `/api/v1/checkouts/{id}` | API key | Checkout status incl. `transactionReference` once paid |
+| GET | `/api/v1/checkouts/reference/{reference}` | API key | Lookup by your own order reference (most recent) |
+| GET | `/api/v1/checkouts/transaction/{transaction_reference}` | API key | Lookup by verified wallet transaction reference |
 | POST | `/api/v1/checkouts/{id}/verify` | — (public, rate-limited) | JSON verify (browser calls this) |
 | GET | `/c/{id}` | — | Hosted checkout page |
 | POST | `/c/{id}/method` | — + CSRF | Select payment method |

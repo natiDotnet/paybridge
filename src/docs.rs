@@ -80,6 +80,8 @@ pub fn health() {}
         health,
         crate::api::create_checkout,
         crate::api::get_checkout,
+        crate::api::get_checkout_by_reference,
+        crate::api::get_checkout_by_transaction,
         crate::public_verify::verify,
     ),
     components(schemas(

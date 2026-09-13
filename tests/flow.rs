@@ -141,6 +141,57 @@ async fn full_checkout_flow() {
     assert_eq!(detail["transactionReference"], "FT1");
     assert_eq!(detail["paymentMethod"]["provider"], "telebirr");
 
+    // --- 5b. lookup by merchant reference and by transaction reference ----------
+    let (status, body) = call(
+        &app,
+        request(
+            "GET",
+            "/api/v1/checkouts/reference/ORDER-1",
+            merchant_headers(None),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "by reference: {body}");
+    assert_eq!(body["checkoutId"], json!(checkout_id));
+    assert_eq!(body["transactionReference"], "FT1");
+
+    let (status, body) = call(
+        &app,
+        request(
+            "GET",
+            "/api/v1/checkouts/transaction/FT1",
+            merchant_headers(None),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "by transaction: {body}");
+    assert_eq!(body["checkoutId"], json!(checkout_id));
+
+    let (status, body) = call(
+        &app,
+        request(
+            "GET",
+            "/api/v1/checkouts/reference/UNKNOWN-REF",
+            merchant_headers(None),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown reference: {body}");
+    let (status, body) = call(
+        &app,
+        request(
+            "GET",
+            "/api/v1/checkouts/transaction/FT-NEVER-SEEN",
+            merchant_headers(None),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown transaction: {body}");
+
     // --- 6. succeeded is terminal ------------------------------------------------
     let (status, body) = verify(&app, &checkout_id, "FT2").await;
     assert_eq!(status, StatusCode::CONFLICT);

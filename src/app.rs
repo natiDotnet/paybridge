@@ -37,6 +37,14 @@ pub fn build_app(state: AppState) -> Router {
             get(crate::api::get_checkout),
         )
         .route(
+            "/api/v1/checkouts/reference/{reference}",
+            get(crate::api::get_checkout_by_reference),
+        )
+        .route(
+            "/api/v1/checkouts/transaction/{transaction_reference}",
+            get(crate::api::get_checkout_by_transaction),
+        )
+        .route(
             "/api/v1/checkouts/{checkout_id}/verify",
             post(crate::public_verify::verify),
         )
