@@ -27,6 +27,7 @@ pub struct VerifyQuery<'a> {
 }
 
 /// Authoritative transaction facts as returned by the verification service.
+#[derive(Debug)]
 pub struct VerifiedTransaction {
     /// The provider's canonical reference (may differ in case from user input).
     pub reference: String,
@@ -39,6 +40,7 @@ pub struct VerifiedTransaction {
     pub raw: serde_json::Value,
 }
 
+#[derive(Debug)]
 pub enum VerifyError {
     /// No such transaction at the provider.
     NotFound,
