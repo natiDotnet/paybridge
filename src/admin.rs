@@ -581,12 +581,14 @@ pub struct RecentPayment {
 pub struct DashboardPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub today_total: i64,
     pub today_succeeded: i64,
     pub today_failed: i64,
     pub volume_display: String,
     pub pending: i64,
     pub recent: Vec<RecentPayment>,
+    pub activity: Vec<ActivityDay>,
 }
 
 pub async fn dashboard(
@@ -658,17 +660,48 @@ pub async fn dashboard(
         Err(e) => return db_error(e),
     };
 
+    // 14-day payment activity for the chart (zero days included).
+    let start_day = (chrono::Utc::now() - chrono::Duration::days(13))
+        .format("%Y-%m-%d")
+        .to_string();
+    let per_day: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT substr(created_at, 1, 10) AS day, COUNT(*), COALESCE(SUM(amount_minor), 0) FROM checkouts WHERE created_at >= ? GROUP BY day ORDER BY day",
+    )
+    .bind(&start_day)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let max_count = per_day.iter().map(|(_, c, _)| *c).max().unwrap_or(0);
+    let mut activity = Vec::new();
+    for i in 0..14 {
+        let date = chrono::Utc::now() - chrono::Duration::days((13 - i) as i64);
+        let key = date.format("%Y-%m-%d").to_string();
+        let (count, sum) = per_day
+            .iter()
+            .find(|(d, _, _)| *d == key)
+            .map(|(_, c, s)| (*c, *s))
+            .unwrap_or((0, 0));
+        let height_pct = if max_count > 0 && count > 0 { ((count * 100) / max_count) as u32 } else { 0 };
+        activity.push(ActivityDay {
+            day: date.format("%b %d").to_string(),
+            count,
+            volume_display: format_minor(sum),
+            height_pct,
+        });
+    }
     page(
         StatusCode::OK,
         DashboardPage {
             section: "dashboard",
-            csrf: sess.token,
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             today_total,
             today_succeeded,
             today_failed,
             volume_display: format_minor(volume_minor),
             pending,
             recent,
+            activity,
         },
     )
 }
@@ -682,6 +715,7 @@ pub async fn dashboard(
 pub struct MerchantsPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub rows: Vec<MerchantRow>,
 }
 
@@ -719,7 +753,7 @@ pub async fn merchants(
     };
     page(
         StatusCode::OK,
-        MerchantsPage { section: "merchants", csrf: sess.token, rows },
+        MerchantsPage { section: "merchants", csrf: sess.token.clone(), email: sess.user.email.clone(), rows },
     )
 }
 
@@ -757,6 +791,7 @@ pub struct MerchantCheckoutRow {
 pub struct MerchantPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub merchant_id: String,
     pub name: String,
     pub status: String,
@@ -778,7 +813,7 @@ pub async fn merchant_detail(
     Extension(sess): Extension<SessionInfo>,
     Path(merchant_id): Path<String>,
 ) -> Response {
-    merchant_page(&state, &merchant_id, None, sess.token).await
+    merchant_page(&state, &merchant_id, None, sess.token.clone(), sess.user.email.clone()).await
 }
 
 async fn merchant_page(
@@ -786,6 +821,7 @@ async fn merchant_page(
     merchant_id: &str,
     new_key: Option<String>,
     csrf: String,
+    email: String,
 ) -> Response {
     let Some((name, status, onboarding, credits, created_at)) = sqlx::query_as::<
         _,
@@ -884,6 +920,7 @@ async fn merchant_page(
         MerchantPage {
             section: "merchants",
             csrf,
+            email,
             merchant_id: merchant_id.to_string(),
             name,
             status,
@@ -1179,7 +1216,7 @@ pub async fn method_create(
     )
     .await;
 
-    merchant_page(&state, &merchant_id, None, sess.token).await
+    merchant_page(&state, &merchant_id, None, sess.token.clone(), sess.user.email.clone()).await
 }
 
 #[derive(Deserialize)]
@@ -1412,7 +1449,7 @@ pub async fn key_create(
     )
     .await;
 
-    merchant_page(&state, &merchant_id, Some(secret), sess.token).await
+    merchant_page(&state, &merchant_id, Some(secret), sess.token.clone(), sess.user.email.clone()).await
 }
 
 #[derive(Deserialize)]
@@ -1547,7 +1584,7 @@ pub async fn key_rotate(
     )
     .await;
 
-    merchant_page(&state, &merchant_id, Some(new_secret), sess.token).await
+    merchant_page(&state, &merchant_id, Some(new_secret), sess.token.clone(), sess.user.email.clone()).await
 }
 
 /// Same as `insert_api_key` but on an open transaction (used by rotate).
@@ -1580,6 +1617,8 @@ pub struct CheckoutRow {
     pub reference: String,
     pub merchant: String,
     pub amount_display: String,
+    pub method: String,
+    pub transaction_reference: Option<String>,
     pub status: String,
     pub created_at: String,
 }
@@ -1589,6 +1628,7 @@ pub struct CheckoutRow {
 pub struct CheckoutsPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub rows: Vec<CheckoutRow>,
     pub merchants: Vec<(String, String)>,
     pub q: String,
@@ -1620,8 +1660,16 @@ pub async fn checkouts(
     let merchant = f.merchant.unwrap_or_default();
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, m.name \
-         FROM checkouts c JOIN merchants m ON m.id = c.merchant_id WHERE 1=1",
+        "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, m.name, \
+                COALESCE(pm.display_name, ''), \
+                (SELECT t.transaction_reference FROM transactions t \
+                 JOIN payments p ON p.id = t.payment_id \
+                 WHERE p.checkout_id = c.id AND p.status = 'succeeded' \
+                 ORDER BY t.created_at DESC LIMIT 1) \
+         FROM checkouts c \
+         JOIN merchants m ON m.id = c.merchant_id \
+         LEFT JOIN merchant_payment_methods pm ON pm.id = c.selected_method_id \
+         WHERE 1=1",
     );
     if matches!(status.as_str(), "created" | "pending" | "succeeded" | "failed" | "expired") {
         qb.push(" AND c.status = ").push_bind(status.clone());
@@ -1643,20 +1691,26 @@ pub async fn checkouts(
     qb.push(" ORDER BY c.created_at DESC LIMIT 50");
 
     let rows = match qb
-        .build_query_as::<(String, String, i64, String, String, String)>()
+        .build_query_as::<(String, String, i64, String, String, String, String, Option<String>)>()
         .fetch_all(&state.pool)
         .await
     {
         Ok(rows) => rows
             .into_iter()
-            .map(|(id, reference, amount_minor, status, created_at, merchant)| CheckoutRow {
-                checkout_id: id,
-                reference,
-                amount_display: format_minor(amount_minor),
-                status,
-                created_at,
-                merchant,
-            })
+            .map(
+                |(id, reference, amount_minor, status, created_at, merchant, method, txn_ref)| {
+                    CheckoutRow {
+                        checkout_id: id,
+                        reference,
+                        amount_display: format_minor(amount_minor),
+                        status,
+                        created_at,
+                        merchant,
+                        method,
+                        transaction_reference: txn_ref,
+                    }
+                },
+            )
             .collect(),
         Err(e) => return db_error(e),
     };
@@ -1665,7 +1719,8 @@ pub async fn checkouts(
         StatusCode::OK,
         CheckoutsPage {
             section: "checkouts",
-            csrf: sess.token,
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             rows,
             merchants,
             q,
@@ -1680,6 +1735,55 @@ pub struct AttemptRow {
     pub detail: Option<String>,
     pub transaction_reference: String,
     pub created_at: String,
+}
+
+/// One step of the payment story shown on checkout detail pages:
+/// created -> payment submitted -> verified -> webhook delivered.
+pub struct TimelineRow {
+    pub label: String,
+    pub at: String,
+}
+
+/// One day of the 14-day payment activity chart.
+pub struct ActivityDay {
+    pub day: String,
+    pub count: i64,
+    pub volume_display: String,
+    pub height_pct: u32,
+}
+
+async fn checkout_timeline(
+    pool: &sqlx::SqlitePool,
+    checkout_id: &str,
+    created_at: &str,
+    paid_at: &Option<String>,
+) -> Vec<TimelineRow> {
+    let mut rows = vec![TimelineRow {
+        label: "Checkout created".to_string(),
+        at: created_at.to_string(),
+    }];
+    if let Ok(Some((submitted,))) = sqlx::query_as::<_, (String,)>(
+        "SELECT MIN(created_at) FROM payments WHERE checkout_id = ?",
+    )
+    .bind(checkout_id)
+    .fetch_optional(pool)
+    .await
+    {
+        rows.push(TimelineRow { label: "Payment submitted".to_string(), at: submitted });
+    }
+    if let Some(paid) = paid_at {
+        rows.push(TimelineRow { label: "Transaction verified".to_string(), at: paid.clone() });
+    }
+    if let Ok(Some((delivered,))) = sqlx::query_as::<_, (String,)>(
+        "SELECT MIN(d.created_at) FROM webhook_deliveries d JOIN outbox_messages o ON o.id = d.outbox_id WHERE o.aggregate_id = ? AND d.status_code BETWEEN 200 AND 299",
+    )
+    .bind(checkout_id)
+    .fetch_optional(pool)
+    .await
+    {
+        rows.push(TimelineRow { label: "Webhook delivered".to_string(), at: delivered });
+    }
+    rows
 }
 
 pub struct DeliveryRow {
@@ -1715,6 +1819,7 @@ pub struct TransactionView {
 pub struct CheckoutPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub checkout_id: String,
     pub reference: String,
     pub merchant_id: String,
@@ -1731,6 +1836,7 @@ pub struct CheckoutPage {
     pub expires_at: String,
     pub attempts: Vec<AttemptRow>,
     pub events: Vec<EventRow>,
+    pub timeline: Vec<TimelineRow>,
 }
 
 pub async fn checkout_detail(
@@ -1896,11 +2002,13 @@ pub async fn checkout_detail(
         .collect::<Vec<_>>()
         .join(" \u{b7} ");
 
+    let timeline = checkout_timeline(&state.pool, &checkout_id, &created_at, &paid_at).await;
     page(
         StatusCode::OK,
         CheckoutPage {
             section: "checkouts",
-            csrf: sess.token,
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             checkout_id,
             reference,
             merchant_id,
@@ -1917,6 +2025,7 @@ pub async fn checkout_detail(
             expires_at,
             attempts,
             events,
+            timeline,
         },
     )
 }
@@ -1948,6 +2057,7 @@ pub struct DeliveryListRow {
 pub struct WebhooksPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub endpoints: Vec<EndpointRow>,
     pub deliveries: Vec<DeliveryListRow>,
 }
@@ -2009,7 +2119,8 @@ pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<
         StatusCode::OK,
         WebhooksPage {
             section: "webhooks",
-            csrf: sess.token,
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             endpoints,
             deliveries,
         },
@@ -2021,6 +2132,7 @@ pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<
 pub struct DeliveryPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub delivery_id: String,
     pub event_id: String,
     pub event_type: String,
@@ -2115,7 +2227,8 @@ pub async fn delivery_detail(
         StatusCode::OK,
         DeliveryPage {
             section: "webhooks",
-            csrf: sess.token,
+            csrf: sess.token.clone(),
+            email: sess.user.email.clone(),
             delivery_id,
             event_id: outbox_id,
             event_type,
@@ -2218,6 +2331,7 @@ pub struct AuditRow {
 pub struct AuditPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub rows: Vec<AuditRow>,
 }
 
@@ -2250,7 +2364,7 @@ pub async fn audit_page(State(state): State<AppState>, Extension(sess): Extensio
 
     page(
         StatusCode::OK,
-        AuditPage { section: "audit", csrf: sess.token, rows },
+        AuditPage { section: "audit", csrf: sess.token.clone(), email: sess.user.email.clone(), rows },
     )
 }
 
@@ -2273,6 +2387,7 @@ pub struct UserRow {
 pub struct UsersPage {
     pub section: &'static str,
     pub csrf: String,
+    pub email: String,
     pub rows: Vec<UserRow>,
     pub merchants: Vec<(String, String)>,
 }
@@ -2319,7 +2434,7 @@ pub async fn users_page(
 
     page(
         StatusCode::OK,
-        UsersPage { section: "users", csrf: sess.token, rows, merchants },
+        UsersPage { section: "users", csrf: sess.token.clone(), email: sess.user.email.clone(), rows, merchants },
     )
 }
 
@@ -2476,6 +2591,8 @@ pub struct PortalCheckoutRow {
     pub checkout_id: String,
     pub reference: String,
     pub amount_display: String,
+    pub method: String,
+    pub transaction_reference: Option<String>,
     pub status: String,
     pub created_at: String,
 }
@@ -2518,6 +2635,7 @@ pub struct PortalCheckoutsPage {
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
+    pub credits: i64,
     pub rows: Vec<PortalCheckoutRow>,
     pub q: String,
     pub status: String,
@@ -2530,6 +2648,7 @@ pub struct PortalCheckoutPage {
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
+    pub credits: i64,
     pub checkout_id: String,
     pub reference: String,
     pub amount_display: String,
@@ -2544,6 +2663,7 @@ pub struct PortalCheckoutPage {
     pub expires_at: String,
     pub attempts: Vec<AttemptRow>,
     pub events: Vec<EventRow>,
+    pub timeline: Vec<TimelineRow>,
 }
 
 pub struct PortalDeliveryListRow {
@@ -2563,6 +2683,7 @@ pub struct PortalWebhooksPage {
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
+    pub credits: i64,
     pub endpoints: Vec<MerchantEndpointRow>,
     pub deliveries: Vec<PortalDeliveryListRow>,
 }
@@ -2574,6 +2695,7 @@ pub struct PortalDeliveryPage {
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
+    pub credits: i64,
     pub delivery_id: String,
     pub event_id: String,
     pub event_type: String,
@@ -2691,7 +2813,7 @@ pub async fn portal_home(
     .map(|rows| {
         rows.into_iter()
             .map(
-                |(method_id, provider, display_name, account_identifier, instructions, status)| {
+                |(method_id, provider, display_name, account_identifier, _instructions, status)| {
                     MerchantMethodRow {
                         method_id,
                         provider,
@@ -2754,46 +2876,57 @@ pub async fn portal_checkouts(
     Extension(sess): Extension<SessionInfo>,
     Query(f): Query<PortalCheckoutFilters>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
     let q = f.q.unwrap_or_default().trim().to_string();
     let status = f.status.unwrap_or_default();
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, reference, amount_minor, status, created_at FROM checkouts WHERE merchant_id = ",
+        "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, COALESCE(pm.display_name, ''), \
+                (SELECT t.transaction_reference FROM transactions t \
+                 JOIN payments p ON p.id = t.payment_id \
+                 WHERE p.checkout_id = c.id AND p.status = 'succeeded' \
+                 ORDER BY t.created_at DESC LIMIT 1) \
+         FROM checkouts c LEFT JOIN merchant_payment_methods pm ON pm.id = c.selected_method_id WHERE c.merchant_id = ",
     );
     qb.push_bind(&merchant_id);
     if matches!(status.as_str(), "created" | "pending" | "succeeded" | "failed" | "expired") {
-        qb.push(" AND status = ").push_bind(status.clone());
+        qb.push(" AND c.status = ").push_bind(status.clone());
     }
     if !q.is_empty() {
         let needle = format!("%{q}%");
-        qb.push(" AND (reference LIKE ")
+        qb.push(" AND (c.reference LIKE ")
             .push_bind(needle.clone())
-            .push(" OR id LIKE ")
+            .push(" OR c.id LIKE ")
             .push_bind(needle.clone())
             .push(" OR EXISTS (SELECT 1 FROM payments p JOIN transactions t ON t.payment_id = p.id \
-                   WHERE p.checkout_id = checkouts.id AND t.transaction_reference LIKE ")
+                   WHERE p.checkout_id = c.id AND t.transaction_reference LIKE ")
             .push_bind(needle)
             .push("))");
     }
-    qb.push(" ORDER BY created_at DESC LIMIT 50");
+    qb.push(" ORDER BY c.created_at DESC LIMIT 50");
 
     let rows = match qb
-        .build_query_as::<(String, String, i64, String, String)>()
+        .build_query_as::<(String, String, i64, String, String, String, Option<String>)>()
         .fetch_all(&state.pool)
         .await
     {
         Ok(rows) => rows
             .into_iter()
-            .map(|(id, reference, amount_minor, st, created_at)| PortalCheckoutRow {
-                checkout_id: id,
-                reference,
-                amount_display: format_minor(amount_minor),
-                status: st,
-                created_at,
-            })
+            .map(
+                |(id, reference, amount_minor, st, created_at, method, transaction_reference)| {
+                    PortalCheckoutRow {
+                        checkout_id: id,
+                        reference,
+                        amount_display: format_minor(amount_minor),
+                        method,
+                        transaction_reference,
+                        status: st,
+                        created_at,
+                    }
+                },
+            )
             .collect(),
         Err(e) => return db_error(e),
     };
@@ -2805,6 +2938,7 @@ pub async fn portal_checkouts(
             csrf: sess.token.clone(),
             email: sess.user.email.clone(),
             merchant_name,
+            credits,
             rows,
             q,
             status,
@@ -2817,7 +2951,7 @@ pub async fn portal_checkout_detail(
     Extension(sess): Extension<SessionInfo>,
     Path(checkout_id): Path<String>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
     // Ownership first: other merchants' checkouts look like unknown ones.
@@ -2975,6 +3109,7 @@ pub async fn portal_checkout_detail(
         .collect::<Vec<_>>()
         .join(" \u{b7} ");
 
+    let timeline = checkout_timeline(&state.pool, &checkout_id, &created_at, &paid_at).await;
     page(
         StatusCode::OK,
         PortalCheckoutPage {
@@ -2982,6 +3117,7 @@ pub async fn portal_checkout_detail(
             csrf: sess.token.clone(),
             email: sess.user.email.clone(),
             merchant_name,
+            credits,
             checkout_id,
             reference,
             amount_display: format_minor(amount_minor),
@@ -2996,6 +3132,7 @@ pub async fn portal_checkout_detail(
             expires_at,
             attempts,
             events,
+            timeline,
         },
     )
 }
@@ -3006,7 +3143,7 @@ pub async fn portal_webhooks(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
 
@@ -3063,6 +3200,7 @@ pub async fn portal_webhooks(
             csrf: sess.token.clone(),
             email: sess.user.email.clone(),
             merchant_name,
+            credits,
             endpoints,
             deliveries,
         },
@@ -3074,7 +3212,7 @@ pub async fn portal_delivery_detail(
     Extension(sess): Extension<SessionInfo>,
     Path(delivery_id): Path<String>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
     // Ownership: only deliveries that went to this merchant's endpoints.
@@ -3153,6 +3291,7 @@ pub async fn portal_delivery_detail(
             csrf: sess.token.clone(),
             email: sess.user.email.clone(),
             merchant_name,
+            credits,
             delivery_id,
             event_id: outbox_id,
             event_type,
@@ -3513,6 +3652,7 @@ pub struct PortalMethodsPage {
     pub csrf: String,
     pub email: String,
     pub merchant_name: String,
+    pub credits: i64,
     pub methods: Vec<MerchantMethodRow>,
     pub providers: Vec<(String, String)>,
 }
@@ -3521,7 +3661,7 @@ pub async fn portal_methods_page(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, _)) = portal_merchant(&state, &sess).await else {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
 
@@ -3555,6 +3695,7 @@ pub async fn portal_methods_page(
             csrf: sess.token.clone(),
             email: sess.user.email.clone(),
             merchant_name,
+            credits,
             methods,
             providers: PROVIDERS
                 .iter()

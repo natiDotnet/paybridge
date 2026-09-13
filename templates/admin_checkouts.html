@@ -29,13 +29,15 @@
   <p class="empty">No checkouts match.</p>
   {% else %}
   <table>
-    <tr><th>Checkout</th><th>Merchant</th><th>Reference</th><th class="num">Amount</th><th>Status</th><th>Created</th></tr>
+    <tr><th>Checkout</th><th>Merchant</th><th>Reference</th><th class="num">Amount</th><th>Method</th><th>Transaction ref</th><th>Status</th><th>Created</th></tr>
     {% for c in rows %}
     <tr>
       <td><a href="/admin/checkouts/{{ c.checkout_id }}">{{ c.checkout_id }}</a></td>
       <td>{{ c.merchant }}</td>
       <td>{{ c.reference }}</td>
       <td class="num">{{ c.amount_display }}</td>
+      <td>{% if c.method.is_empty() %}&mdash;{% else %}{{ c.method }}{% endif %}</td>
+      <td class="id">{% match c.transaction_reference %}{% when Some with (r) %}{{ r }}{% when None %}&mdash;{% endmatch %}</td>
       <td><span class="st st-{{ c.status }}">{{ c.status }}</span></td>
       <td>{{ c.created_at }}</td>
     </tr>

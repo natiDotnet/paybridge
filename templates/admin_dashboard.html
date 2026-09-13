@@ -12,6 +12,23 @@
 </div>
 
 <div class="card">
+  <h2>Payment activity &mdash; last 14 days</h2>
+  {% if activity.is_empty() %}
+  <p class="empty">No activity yet.</p>
+  {% else %}
+  <div class="chart">
+    {% for a in activity %}
+    <div class="bar {% if a.count == 0 %}zero{% endif %}" style="height: {% if a.height_pct == 0 %}1{% else %}{{ a.height_pct }}{% endif %}%"
+         title="{{ a.day }} — {{ a.count }} payments, {{ a.volume_display }} ETB"></div>
+    {% endfor %}
+  </div>
+  <div class="chart-days">
+    {% for a in activity %}<span>{{ a.day }}</span>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>Recent payments</h2>
   {% if recent.is_empty() %}
   <p class="empty">No checkouts yet.</p>

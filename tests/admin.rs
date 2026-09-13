@@ -1088,7 +1088,7 @@ async fn portal_scoping() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!body.contains("chk_other"), "list must not leak other merchants");
+    assert!(!body.contains("chk_other"), "list must not leak other merchants: {body}");
 
     // Webhooks: sees own delivery, can retry it.
     let (status, body, _) = call(&app, get("/portal/webhooks", Some(&owner_cookie))).await;

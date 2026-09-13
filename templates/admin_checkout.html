@@ -24,6 +24,15 @@
   </div>
 </div>
 
+<div class="card">
+  <h2>Timeline</h2>
+  <ul class="timeline">
+    {% for t in timeline %}
+    <li><span class="t-label">{{ t.label }}</span><span class="t-at">{{ t.at }}</span></li>
+    {% endfor %}
+  </ul>
+</div>
+
 {% if !events.is_empty() %}
 <p class="section-label">Webhook events</p>
 {% for e in events %}
