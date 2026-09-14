@@ -17,8 +17,7 @@ async fn main() {
     let pool = db::create_pool(&config.database_url)
         .await
         .expect("failed to open database");
-    sqlx::migrate!()
-        .run(&pool)
+    db::migrate(&pool)
         .await
         .expect("failed to run migrations");
     paybridge::admin::ensure_bootstrap_admin(&pool, &config.admin_email, &config.admin_password)

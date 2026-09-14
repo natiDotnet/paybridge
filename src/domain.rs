@@ -5,8 +5,9 @@
 
 use chrono::SecondsFormat;
 use serde_json::json;
-use sqlx::SqlitePool;
+use crate::db::Pool;
 
+use crate::db;
 use crate::ids::{new_id, now_iso, parse_iso, to_iso};
 use crate::money::format_minor;
 use crate::state::AppState;
@@ -36,8 +37,8 @@ pub struct MethodRow {
     pub status: String,
 }
 
-pub async fn load_checkout(pool: &SqlitePool, checkout_id: &str) -> Result<Option<CheckoutRow>, sqlx::Error> {
-    sqlx::query_as::<_, CheckoutRow>(
+pub async fn load_checkout(pool: &Pool, checkout_id: &str) -> Result<Option<CheckoutRow>, sqlx::Error> {
+    db::query_as::<CheckoutRow>(
         "SELECT id, merchant_id, reference, amount_minor, currency, status, selected_method_id, return_url, created_at \
          FROM checkouts WHERE id = ?",
     )
@@ -46,8 +47,8 @@ pub async fn load_checkout(pool: &SqlitePool, checkout_id: &str) -> Result<Optio
     .await
 }
 
-pub async fn load_method(pool: &SqlitePool, method_id: &str) -> Result<Option<MethodRow>, sqlx::Error> {
-    sqlx::query_as::<_, MethodRow>(
+pub async fn load_method(pool: &Pool, method_id: &str) -> Result<Option<MethodRow>, sqlx::Error> {
+    db::query_as::<MethodRow>(
         "SELECT id, merchant_id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE id = ?",
     )
@@ -109,7 +110,7 @@ pub async fn verify_checkout(
     // Prepaid credits: every successful verification costs the merchant one
     // credit. Credit-purchase checkouts (paid to the platform merchant) are
     // exempt — they are how merchants top up in the first place.
-    let is_credit_purchase = sqlx::query_as::<_, (i64,)>(
+    let is_credit_purchase = db::query_as::<(i64,)>(
         "SELECT COUNT(*) FROM credit_purchases WHERE checkout_id = ?",
     )
     .bind(&checkout.id)
@@ -118,7 +119,7 @@ pub async fn verify_checkout(
         .0
         > 0;
     if !is_credit_purchase {
-        let (balance,): (i64,) = sqlx::query_as(
+        let (balance,): (i64,) = db::query_as(
             "SELECT credit_balance FROM merchants WHERE id = ?",
         )
         .bind(&checkout.merchant_id)
@@ -131,7 +132,7 @@ pub async fn verify_checkout(
 
     // Rate limits: total *real* attempts per checkout (verification-service
     // outages are never charged against the customer) and a small cooldown.
-    let (attempts,) = sqlx::query_as::<_, (i64,)>(
+    let (attempts,) = db::query_as::<(i64,)>(
         "SELECT COUNT(*) FROM payment_attempts \
          WHERE checkout_id = ? AND outcome != 'verification_service_error'",
     )
@@ -141,7 +142,7 @@ pub async fn verify_checkout(
     if attempts >= state.config.verify_max_attempts {
         return Ok(VerifyResult::TooManyAttempts);
     }
-    if let Some((last_at,)) = sqlx::query_as::<_, (String,)>(
+    if let Some((last_at,)) = db::query_as::<(String,)>(
         "SELECT created_at FROM payment_attempts WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 1",
     )
     .bind(&checkout.id)
@@ -158,7 +159,7 @@ pub async fn verify_checkout(
 
     // One payment row per verify run.
     let payment_id = new_id("pay");
-    sqlx::query(
+    db::query(
         "INSERT INTO payments (id, checkout_id, method_id, provider, status, amount_minor, currency, created_at) \
          VALUES (?, ?, ?, ?, 'initiated', ?, ?, ?)",
     )
@@ -293,7 +294,7 @@ pub async fn verify_checkout(
             }
         };
 
-    sqlx::query(
+    db::query(
         "INSERT INTO payment_attempts (id, checkout_id, transaction_reference, outcome, detail, created_at) \
          VALUES (?, ?, ?, ?, ?, ?)",
     )
@@ -313,8 +314,8 @@ pub async fn verify_checkout(
     Ok(result)
 }
 
-async fn mark_payment_failed(pool: &SqlitePool, payment_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE payments SET status = 'failed' WHERE id = ?")
+async fn mark_payment_failed(pool: &Pool, payment_id: &str) -> Result<(), sqlx::Error> {
+    db::query("UPDATE payments SET status = 'failed' WHERE id = ?")
         .bind(payment_id)
         .execute(pool)
         .await?;
@@ -361,7 +362,7 @@ async fn consume_transaction(
 
     let mut db = state.pool.begin().await.map_err(ConsumeError::Db)?;
 
-    let insert = sqlx::query(
+    let insert = db::query(
         "INSERT INTO transactions \
          (id, payment_id, provider, transaction_reference, amount_minor, currency, recipient, occurred_at, raw_response, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -386,7 +387,7 @@ async fn consume_transaction(
         return Err(ConsumeError::Db(e));
     }
 
-    let updated = sqlx::query(
+    let updated = db::query(
         "UPDATE checkouts SET status = 'succeeded', paid_at = ?, updated_at = ? \
          WHERE id = ? AND status = 'pending'",
     )
@@ -400,13 +401,13 @@ async fn consume_transaction(
         return Err(ConsumeError::LostRace); // someone else transitioned the checkout
     }
 
-    sqlx::query("UPDATE payments SET status = 'succeeded' WHERE id = ?")
+    db::query("UPDATE payments SET status = 'succeeded' WHERE id = ?")
         .bind(payment_id)
         .execute(&mut *db)
         .await
         .map_err(ConsumeError::Db)?;
 
-    sqlx::query(
+    db::query(
         "INSERT INTO outbox_messages (id, event_type, aggregate_id, payload, status, attempts, next_attempt_at, created_at) \
          VALUES (?, 'checkout.payment_succeeded', ?, ?, 'pending', 0, ?, ?)",
     )
@@ -422,14 +423,14 @@ async fn consume_transaction(
     if is_credit_purchase {
         // The buyer paid the platform wallet: credit their account and
         // activate the merchant — atomically with the checkout success.
-        let (buyer_id, credits): (String, i64) = sqlx::query_as(
+        let (buyer_id, credits): (String, i64) = db::query_as(
             "SELECT merchant_id, credits FROM credit_purchases WHERE checkout_id = ?",
         )
         .bind(&checkout.id)
         .fetch_one(&mut *db)
         .await
         .map_err(ConsumeError::Db)?;
-        sqlx::query(
+        db::query(
             "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
              VALUES (?, ?, ?, 'purchase', ?, ?)",
         )
@@ -441,7 +442,7 @@ async fn consume_transaction(
         .execute(&mut *db)
         .await
         .map_err(ConsumeError::Db)?;
-        sqlx::query(
+        db::query(
             "UPDATE merchants SET credit_balance = credit_balance + ?, onboarding_status = 'approved' \
              WHERE id = ?",
         )
@@ -453,7 +454,7 @@ async fn consume_transaction(
     } else {
         // One credit per successful verification; the > 0 guard rolls the
         // whole transaction back if credits ran out under us.
-        let charged = sqlx::query(
+        let charged = db::query(
             "UPDATE merchants SET credit_balance = credit_balance - 1 \
              WHERE id = ? AND credit_balance > 0",
         )
@@ -464,7 +465,7 @@ async fn consume_transaction(
         if charged.rows_affected() == 0 {
             return Err(ConsumeError::NoCredits);
         }
-        sqlx::query(
+        db::query(
             "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
              VALUES (?, ?, -1, 'verification', ?, ?)",
         )

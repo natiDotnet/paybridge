@@ -15,6 +15,9 @@ use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
 
+use crate::db;
+use crate::db::Db;
+use crate::db::Pool;
 use crate::ids::{new_id, now_iso};
 use crate::money::format_minor;
 use crate::state::AppState;
@@ -107,8 +110,8 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
 }
 
 /// Create the first superadmin from env config if none exists yet.
-pub async fn ensure_bootstrap_admin(pool: &sqlx::SqlitePool, email: &str, password: &str) {
-    let (count,): (i64,) = match sqlx::query_as(
+pub async fn ensure_bootstrap_admin(pool: &Pool, email: &str, password: &str) {
+    let (count,): (i64,) = match db::query_as(
         "SELECT COUNT(*) FROM users WHERE role = 'superadmin'",
     )
     .fetch_one(pool)
@@ -123,9 +126,9 @@ pub async fn ensure_bootstrap_admin(pool: &sqlx::SqlitePool, email: &str, passwo
     if count > 0 {
         return;
     }
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
-         VALUES (?, ?, 'Platform Admin', ?, 'superadmin', NULL, 'active', ?)",
+    let _ = db::query(
+        "INSERT INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
+         VALUES (?, ?, 'Platform Admin', ?, 'superadmin', NULL, 'active', ?) ON CONFLICT DO NOTHING",
     )
     .bind(new_id("usr"))
     .bind(email)
@@ -165,7 +168,7 @@ async fn session_info(state: &AppState, headers: &HeaderMap) -> Option<SessionIn
     let raw = read_cookie(headers, USER_COOKIE)?;
     let (user_id, token) = raw.split_once('.')?;
     let (password_hash, email, role, merchant_id): (String, String, String, Option<String>) =
-        sqlx::query_as(
+        db::query_as(
             "SELECT password_hash, email, role, merchant_id FROM users \
              WHERE id = ? AND status = 'active'",
         )
@@ -240,7 +243,7 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn audit(
-    pool: &sqlx::SqlitePool,
+    pool: &Pool,
     actor: &str,
     ip: Option<&str>,
     action: &str,
@@ -248,7 +251,7 @@ async fn audit(
     resource_id: &str,
     metadata: Option<String>,
 ) {
-    let _ = sqlx::query(
+    let _ = db::query(
         "INSERT INTO audit_logs (id, actor, action, resource, resource_id, ip, metadata, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
@@ -399,7 +402,7 @@ pub async fn login_submit(
 ) -> Response {
     let ip = client_ip(&headers);
     let email = form.email.trim().to_lowercase();
-    let row: Option<(String, String, String, String)> = sqlx::query_as(
+    let row: Option<(String, String, String, String)> = db::query_as(
         "SELECT id, password_hash, role, email FROM users \
          WHERE lower(email) = ? AND status = 'active'",
     )
@@ -504,7 +507,7 @@ pub async fn signup_submit(
     if password.len() < 8 {
         return error("Password must be at least 8 characters.");
     }
-    let (exists,): (i64,) = match sqlx::query_as(
+    let (exists,): (i64,) = match db::query_as(
         "SELECT COUNT(*) FROM users WHERE lower(email) = ?",
     )
     .bind(&email)
@@ -524,7 +527,7 @@ pub async fn signup_submit(
         Ok(db) => db,
         Err(e) => return db_error(e),
     };
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO merchants (id, name, status, onboarding_status, created_at) \
          VALUES (?, ?, 'active', 'pending', ?)",
     )
@@ -536,7 +539,7 @@ pub async fn signup_submit(
     {
         return db_error(e);
     }
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
          VALUES (?, ?, ?, ?, 'merchant', ?, 'active', ?)",
     )
@@ -603,8 +606,8 @@ pub async fn dashboard(
     // ISO timestamps sort lexicographically, so ">= YYYY-MM-DD" is "today UTC".
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-    let by_status: Vec<(String, i64, i64)> = match sqlx::query_as(
-        "SELECT status, COUNT(*), COALESCE(SUM(amount_minor), 0) \
+    let by_status: Vec<(String, i64, i64)> = match db::query_as(
+        "SELECT status, COUNT(*), CAST(COALESCE(SUM(amount_minor), 0) AS BIGINT) \
          FROM checkouts WHERE created_at >= ? GROUP BY status",
     )
     .bind(&today)
@@ -631,7 +634,7 @@ pub async fn dashboard(
         }
     }
 
-    let (pending,): (i64,) = match sqlx::query_as(
+    let (pending,): (i64,) = match db::query_as(
         "SELECT COUNT(*) FROM checkouts WHERE status = 'pending'",
     )
     .fetch_one(&state.pool)
@@ -641,8 +644,7 @@ pub async fn dashboard(
         Err(e) => return db_error(e),
     };
 
-    let recent = match sqlx::query_as::<
-        _,
+    let recent = match db::query_as::<
         (String, String, i64, String, String, String),
     >(
         "SELECT c.id, c.reference, c.amount_minor, c.currency, c.status, m.name \
@@ -669,8 +671,8 @@ pub async fn dashboard(
     let start_day = (chrono::Utc::now() - chrono::Duration::days(13))
         .format("%Y-%m-%d")
         .to_string();
-    let per_day: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT substr(created_at, 1, 10) AS day, COUNT(*), COALESCE(SUM(amount_minor), 0) FROM checkouts WHERE created_at >= ? GROUP BY day ORDER BY day",
+    let per_day: Vec<(String, i64, i64)> = db::query_as(
+        "SELECT substr(created_at, 1, 10) AS day, COUNT(*), CAST(COALESCE(SUM(amount_minor), 0) AS BIGINT) FROM checkouts WHERE created_at >= ? GROUP BY day ORDER BY day",
     )
     .bind(&start_day)
     .fetch_all(&state.pool)
@@ -736,7 +738,7 @@ pub async fn merchants(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
 ) -> Response {
-    let rows = match sqlx::query_as::<_, (String, String, String, String, i64)>(
+    let rows = match db::query_as::<(String, String, String, String, i64)>(
         "SELECT m.id, m.name, m.status, m.onboarding_status, COUNT(c.id) \
          FROM merchants m LEFT JOIN checkouts c ON c.merchant_id = m.id \
          GROUP BY m.id, m.name, m.status, m.onboarding_status ORDER BY m.created_at",
@@ -828,8 +830,7 @@ async fn merchant_page(
     csrf: String,
     email: String,
 ) -> Response {
-    let Some((name, status, onboarding, credits, created_at)) = sqlx::query_as::<
-        _,
+    let Some((name, status, onboarding, credits, created_at)) = db::query_as::<
         (String, String, String, i64, String),
     >(
         "SELECT name, status, onboarding_status, credit_balance, created_at FROM merchants WHERE id = ?",
@@ -843,7 +844,7 @@ async fn merchant_page(
         return not_found();
     };
 
-    let methods = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+    let methods = db::query_as::<(String, String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -868,7 +869,7 @@ async fn merchant_page(
     })
     .unwrap_or_default();
 
-    let keys = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let keys = db::query_as::<(String, String, String, Option<String>)>(
         "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
          WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -887,7 +888,7 @@ async fn merchant_page(
     })
     .unwrap_or_default();
 
-    let endpoints = sqlx::query_as::<_, (String, String)>(
+    let endpoints = db::query_as::<(String, String)>(
         "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
     )
     .bind(merchant_id)
@@ -900,7 +901,7 @@ async fn merchant_page(
     })
     .unwrap_or_default();
 
-    let checkouts = sqlx::query_as::<_, (String, String, i64, String, String)>(
+    let checkouts = db::query_as::<(String, String, i64, String, String)>(
         "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
     )
@@ -972,7 +973,7 @@ pub async fn merchant_status(
         _ => return bad_request("unknown action"),
     };
 
-    if let Err(e) = sqlx::query("UPDATE merchants SET status = ? WHERE id = ?")
+    if let Err(e) = db::query("UPDATE merchants SET status = ? WHERE id = ?")
         .bind(next_status)
         .bind(&merchant_id)
         .execute(&state.pool)
@@ -1017,7 +1018,7 @@ pub async fn merchant_approve(
         return bad_request("expired session; go back and retry");
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchants SET onboarding_status = 'approved' \
          WHERE id = ? AND onboarding_status = 'pending'",
     )
@@ -1072,7 +1073,7 @@ pub async fn credits_grant(
         Ok(db) => db,
         Err(e) => return db_error(e),
     };
-    let updated = match sqlx::query(
+    let updated = match db::query(
         "UPDATE merchants SET credit_balance = credit_balance + ? WHERE id = ?",
     )
     .bind(form.amount)
@@ -1086,7 +1087,7 @@ pub async fn credits_grant(
     if updated.rows_affected() == 0 {
         return bad_request("merchant not found");
     }
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO credit_ledger (id, merchant_id, delta, reason, checkout_id, created_at) \
          VALUES (?, ?, ?, 'admin_grant', NULL, ?)",
     )
@@ -1137,8 +1138,8 @@ const DEFAULT_INSTRUCTIONS: &str = "Send exactly the checkout amount to the acco
 
 /// Customer instructions come from central per-provider config (migration
 /// 0006, editable by admins) — merchants never write the steps themselves.
-async fn provider_default_instructions(pool: &sqlx::SqlitePool, provider: &str) -> String {
-    sqlx::query_as::<_, (String,)>(
+async fn provider_default_instructions(pool: &Pool, provider: &str) -> String {
+    db::query_as::<(String,)>(
         "SELECT instructions FROM provider_instructions WHERE provider = ?",
     )
     .bind(provider)
@@ -1195,7 +1196,7 @@ pub async fn method_create(
         None => provider_default_instructions(&state.pool, &form.provider).await,
     };
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO merchant_payment_methods \
          (id, merchant_id, provider, display_name, account_identifier, instructions, status, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
@@ -1254,7 +1255,7 @@ pub async fn method_status(
         _ => return bad_request("unknown action"),
     };
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_payment_methods SET status = ? WHERE id = ? AND merchant_id = ?",
     )
     .bind(next_status)
@@ -1307,7 +1308,7 @@ pub async fn method_account(
         return bad_request("receiving account is required");
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_payment_methods SET account_identifier = ? \
          WHERE id = ? AND merchant_id = ?",
     )
@@ -1366,7 +1367,7 @@ pub async fn method_name(
         return bad_request("display name must be 1-60 characters");
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_payment_methods SET display_name = ? WHERE id = ? AND merchant_id = ?",
     )
     .bind(&name)
@@ -1412,7 +1413,7 @@ pub async fn method_instructions(
         return bad_request("instructions must not be empty");
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_payment_methods SET instructions = ? WHERE id = ? AND merchant_id = ?",
     )
     .bind(&steps)
@@ -1449,12 +1450,12 @@ fn generate_api_key(kind: &str) -> String {
 }
 
 async fn insert_api_key(
-    pool: &sqlx::SqlitePool,
+    pool: &Pool,
     merchant_id: &str,
     kind: &str,
 ) -> Result<String, sqlx::Error> {
     let secret = generate_api_key(kind);
-    sqlx::query(
+    db::query(
         "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) \
          VALUES (?, ?, ?, ?, ?)",
     )
@@ -1533,7 +1534,7 @@ pub async fn key_revoke(
         return bad_request("expired session; go back and retry");
     }
 
-    let prefix: Option<(String,)> = sqlx::query_as(
+    let prefix: Option<(String,)> = db::query_as(
         "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
     )
     .bind(&key_id)
@@ -1546,7 +1547,7 @@ pub async fn key_revoke(
         return not_found();
     };
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_api_keys SET revoked_at = ? \
          WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
     )
@@ -1589,7 +1590,7 @@ pub async fn key_rotate(
         return bad_request("expired session; go back and retry");
     }
 
-    let old: Option<(String, String)> = sqlx::query_as(
+    let old: Option<(String, String)> = db::query_as(
         "SELECT prefix, created_at FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
     )
     .bind(&key_id)
@@ -1612,7 +1613,7 @@ pub async fn key_rotate(
         Ok(db) => db,
         Err(e) => return db_error(e),
     };
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     )
     .bind(now_iso())
@@ -1649,12 +1650,12 @@ pub async fn key_rotate(
 
 /// Same as `insert_api_key` but on an open transaction (used by rotate).
 async fn insert_api_key_tx(
-    db: &mut sqlx::SqliteConnection,
+    db: &mut <Db as sqlx::Database>::Connection,
     merchant_id: &str,
     kind: &str,
 ) -> Result<String, sqlx::Error> {
     let secret = generate_api_key(kind);
-    sqlx::query(
+    db::query(
         "INSERT INTO merchant_api_keys (id, merchant_id, prefix, key_hash, created_at) \
          VALUES (?, ?, ?, ?, ?)",
     )
@@ -1708,7 +1709,7 @@ pub async fn checkouts(
     Extension(sess): Extension<SessionInfo>,
     Query(f): Query<CheckoutFilters>,
 ) -> Response {
-    let merchants = sqlx::query_as::<_, (String, String)>(
+    let merchants = db::query_as::<(String, String)>(
         "SELECT id, name FROM merchants ORDER BY name",
     )
     .fetch_all(&state.pool)
@@ -1719,7 +1720,7 @@ pub async fn checkouts(
     let status = f.status.unwrap_or_default();
     let merchant = f.merchant.unwrap_or_default();
 
-    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+    let mut qb = db::query_builder(
         "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, m.name, \
                 COALESCE(pm.display_name, ''), \
                 (SELECT t.transaction_reference FROM transactions t \
@@ -1813,7 +1814,7 @@ pub struct ActivityDay {
 }
 
 async fn checkout_timeline(
-    pool: &sqlx::SqlitePool,
+    pool: &Pool,
     checkout_id: &str,
     created_at: &str,
     paid_at: &Option<String>,
@@ -1822,7 +1823,7 @@ async fn checkout_timeline(
         label: "Checkout created".to_string(),
         at: created_at.to_string(),
     }];
-    if let Ok(Some((submitted,))) = sqlx::query_as::<_, (String,)>(
+    if let Ok(Some((submitted,))) = db::query_as::<(String,)>(
         "SELECT MIN(created_at) FROM payments WHERE checkout_id = ?",
     )
     .bind(checkout_id)
@@ -1834,7 +1835,7 @@ async fn checkout_timeline(
     if let Some(paid) = paid_at {
         rows.push(TimelineRow { label: "Transaction verified".to_string(), at: paid.clone() });
     }
-    if let Ok(Some((delivered,))) = sqlx::query_as::<_, (String,)>(
+    if let Ok(Some((delivered,))) = db::query_as::<(String,)>(
         "SELECT MIN(d.created_at) FROM webhook_deliveries d JOIN outbox_messages o ON o.id = d.outbox_id WHERE o.aggregate_id = ? AND d.status_code BETWEEN 200 AND 299",
     )
     .bind(checkout_id)
@@ -1918,8 +1919,7 @@ pub async fn checkout_detail(
         selected_method_id,
         merchant,
         merchant_id,
-    )) = sqlx::query_as::<
-        _,
+    )) = db::query_as::<
         (
             String,
             i64,
@@ -1951,7 +1951,7 @@ pub async fn checkout_detail(
     };
 
     let method = match &selected_method_id {
-        Some(method_id) => sqlx::query_as::<_, (String, String)>(
+        Some(method_id) => db::query_as::<(String, String)>(
             "SELECT provider, display_name FROM merchant_payment_methods WHERE id = ?",
         )
         .bind(method_id)
@@ -1962,7 +1962,7 @@ pub async fn checkout_detail(
         None => None,
     };
 
-    let transaction = sqlx::query_as::<_, (String, i64, String, String, String)>(
+    let transaction = db::query_as::<(String, i64, String, String, String)>(
         "SELECT t.transaction_reference, t.amount_minor, t.currency, t.recipient, t.occurred_at \
          FROM transactions t JOIN payments p ON p.id = t.payment_id \
          WHERE p.checkout_id = ? AND p.status = 'succeeded' \
@@ -1981,7 +1981,7 @@ pub async fn checkout_detail(
         occurred_at,
     });
 
-    let attempts = sqlx::query_as::<_, (String, Option<String>, String, String)>(
+    let attempts = db::query_as::<(String, Option<String>, String, String)>(
         "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
          WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
     )
@@ -2000,8 +2000,7 @@ pub async fn checkout_detail(
     })
     .unwrap_or_default();
 
-    let mut events: Vec<EventRow> = sqlx::query_as::<
-        _,
+    let mut events: Vec<EventRow> = db::query_as::<
         (String, String, String, i64, String, Option<String>, String),
     >(
         "SELECT id, event_type, status, attempts, next_attempt_at, last_error, payload \
@@ -2029,8 +2028,7 @@ pub async fn checkout_detail(
     .unwrap_or_default();
 
     // All delivery attempts for this checkout's events, grouped per event.
-    let all_deliveries = sqlx::query_as::<
-        _,
+    let all_deliveries = db::query_as::<
         (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
     >(
         "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
@@ -2123,7 +2121,7 @@ pub struct WebhooksPage {
 }
 
 pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
-    let endpoints = sqlx::query_as::<_, (String, String, String, String)>(
+    let endpoints = db::query_as::<(String, String, String, String)>(
         "SELECT e.id, m.name, e.url, e.status \
          FROM webhook_endpoints e JOIN merchants m ON m.id = e.merchant_id \
          ORDER BY m.name, e.created_at",
@@ -2142,8 +2140,7 @@ pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<
     })
     .unwrap_or_default();
 
-    let deliveries = sqlx::query_as::<
-        _,
+    let deliveries = db::query_as::<
         (String, String, String, String, i64, Option<i64>, Option<String>, String),
     >(
         "SELECT d.id, o.id, o.event_type, m.name, d.attempt_no, d.status_code, d.error, d.created_at \
@@ -2219,8 +2216,7 @@ pub async fn delivery_detail(
     Path(delivery_id): Path<String>,
 ) -> Response {
     let Some((outbox_id, endpoint_id, attempt_no, status_code, error, duration_ms, created_at)) =
-        sqlx::query_as::<
-            _,
+        db::query_as::<
             (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
         >(
             "SELECT outbox_id, endpoint_id, attempt_no, status_code, error, duration_ms, created_at \
@@ -2236,7 +2232,7 @@ pub async fn delivery_detail(
     };
 
     let Some((event_type, event_status, event_attempts, next_attempt_at, last_error, payload)) =
-        sqlx::query_as::<_, (String, String, i64, String, Option<String>, String)>(
+        db::query_as::<(String, String, i64, String, Option<String>, String)>(
             "SELECT event_type, status, attempts, next_attempt_at, last_error, payload \
              FROM outbox_messages WHERE id = ?",
         )
@@ -2249,7 +2245,7 @@ pub async fn delivery_detail(
         return not_found();
     };
 
-    let (merchant, url) = sqlx::query_as::<_, (String, String)>(
+    let (merchant, url) = db::query_as::<(String, String)>(
         "SELECT m.name, e.url FROM webhook_endpoints e \
          JOIN merchants m ON m.id = e.merchant_id WHERE e.id = ?",
     )
@@ -2260,7 +2256,7 @@ pub async fn delivery_detail(
     .flatten()
     .unwrap_or_else(|| ("?".into(), "?".into()));
 
-    let history = sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+    let history = db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
         "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
          FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
     )
@@ -2331,7 +2327,7 @@ pub async fn delivery_retry(
         return bad_request("expired session; go back and retry");
     }
 
-    let Some((event_id,)): Option<(String,)> = sqlx::query_as(
+    let Some((event_id,)): Option<(String,)> = db::query_as(
         "SELECT outbox_id FROM webhook_deliveries WHERE id = ?",
     )
     .bind(&delivery_id)
@@ -2345,9 +2341,9 @@ pub async fn delivery_retry(
 
     // One fresh attempt from the retry schedule; `now` makes the dispatcher
     // pick it up on its next poll.
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE outbox_messages \
-         SET status = 'pending', attempts = MAX(attempts - 1, 0), next_attempt_at = ? \
+         SET status = 'pending', attempts = CASE WHEN attempts - 1 > 0 THEN attempts - 1 ELSE 0 END, next_attempt_at = ? \
          WHERE id = ?",
     )
     .bind(now_iso())
@@ -2396,8 +2392,7 @@ pub struct AuditPage {
 }
 
 pub async fn audit_page(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
-    let rows = sqlx::query_as::<
-        _,
+    let rows = db::query_as::<
         (String, String, String, String, Option<String>, Option<String>, String),
     >(
         "SELECT actor, action, resource, resource_id, ip, metadata, created_at \
@@ -2459,8 +2454,7 @@ pub async fn users_page(
     if !can(&sess.user.role, &Cap::ManageUsers) {
         return forbidden();
     }
-    let rows = sqlx::query_as::<
-        _,
+    let rows = db::query_as::<
         (String, String, String, String, Option<String>, String, String),
     >(
         "SELECT u.id, u.email, u.name, u.role, m.name, u.status, u.created_at \
@@ -2485,7 +2479,7 @@ pub async fn users_page(
             .collect()
     })
     .unwrap_or_default();
-    let merchants = sqlx::query_as::<_, (String, String)>(
+    let merchants = db::query_as::<(String, String)>(
         "SELECT id, name FROM merchants ORDER BY name",
     )
     .fetch_all(&state.pool)
@@ -2546,7 +2540,7 @@ pub async fn user_create(
         None
     };
 
-    let (exists,): (i64,) = match sqlx::query_as(
+    let (exists,): (i64,) = match db::query_as(
         "SELECT COUNT(*) FROM users WHERE lower(email) = ?",
     )
     .bind(&email)
@@ -2560,7 +2554,7 @@ pub async fn user_create(
         return bad_request("email already registered");
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO users (id, email, name, password_hash, role, merchant_id, status, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
     )
@@ -2619,7 +2613,7 @@ pub async fn user_status(
         _ => return bad_request("unknown action"),
     };
 
-    if let Err(e) = sqlx::query("UPDATE users SET status = ? WHERE id = ?")
+    if let Err(e) = db::query("UPDATE users SET status = ? WHERE id = ?")
         .bind(next_status)
         .bind(&user_id)
         .execute(&state.pool)
@@ -2811,8 +2805,8 @@ pub async fn portal_home(
     };
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let by_status: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*), COALESCE(SUM(amount_minor), 0) \
+    let by_status: Vec<(String, i64, i64)> = db::query_as(
+        "SELECT status, COUNT(*), CAST(COALESCE(SUM(amount_minor), 0) AS BIGINT) \
          FROM checkouts WHERE merchant_id = ? AND created_at >= ? GROUP BY status",
     )
     .bind(&merchant_id)
@@ -2835,7 +2829,7 @@ pub async fn portal_home(
             _ => {}
         }
     }
-    let (pending,): (i64,) = sqlx::query_as(
+    let (pending,): (i64,) = db::query_as(
         "SELECT COUNT(*) FROM checkouts WHERE merchant_id = ? AND status = 'pending'",
     )
     .bind(&merchant_id)
@@ -2843,7 +2837,7 @@ pub async fn portal_home(
     .await
     .unwrap_or((0,));
 
-    let recent = sqlx::query_as::<_, (String, String, i64, String, String)>(
+    let recent = db::query_as::<(String, String, i64, String, String)>(
         "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
     )
@@ -2863,7 +2857,7 @@ pub async fn portal_home(
     })
     .unwrap_or_default();
 
-    let methods = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+    let methods = db::query_as::<(String, String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -2913,7 +2907,7 @@ async fn portal_merchant(
     sess: &SessionInfo,
 ) -> Option<(String, String, String, i64)> {
     let merchant_id = sess.user.merchant_id.as_deref()?;
-    sqlx::query_as::<_, (String, String, String, i64)>(
+    db::query_as::<(String, String, String, i64)>(
         "SELECT id, name, onboarding_status, credit_balance FROM merchants WHERE id = ?",
     )
     .bind(merchant_id)
@@ -2942,7 +2936,7 @@ pub async fn portal_checkouts(
     let q = f.q.unwrap_or_default().trim().to_string();
     let status = f.status.unwrap_or_default();
 
-    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+    let mut qb = db::query_builder(
         "SELECT c.id, c.reference, c.amount_minor, c.status, c.created_at, COALESCE(pm.display_name, ''), \
                 (SELECT t.transaction_reference FROM transactions t \
                  JOIN payments p ON p.id = t.payment_id \
@@ -3015,8 +3009,7 @@ pub async fn portal_checkout_detail(
         return not_found();
     };
     // Ownership first: other merchants' checkouts look like unknown ones.
-    let Some(row) = sqlx::query_as::<
-        _,
+    let Some(row) = db::query_as::<
         (
             String,
             i64,
@@ -3059,7 +3052,7 @@ pub async fn portal_checkout_detail(
     ) = row;
 
     let method = match &selected_method_id {
-        Some(method_id) => sqlx::query_as::<_, (String, String)>(
+        Some(method_id) => db::query_as::<(String, String)>(
             "SELECT provider, display_name FROM merchant_payment_methods WHERE id = ?",
         )
         .bind(method_id)
@@ -3070,7 +3063,7 @@ pub async fn portal_checkout_detail(
         None => None,
     };
 
-    let transaction = sqlx::query_as::<_, (String, i64, String, String, String)>(
+    let transaction = db::query_as::<(String, i64, String, String, String)>(
         "SELECT t.transaction_reference, t.amount_minor, t.currency, t.recipient, t.occurred_at \
          FROM transactions t JOIN payments p ON p.id = t.payment_id \
          WHERE p.checkout_id = ? AND p.status = 'succeeded' \
@@ -3089,7 +3082,7 @@ pub async fn portal_checkout_detail(
         occurred_at,
     });
 
-    let attempts = sqlx::query_as::<_, (String, Option<String>, String, String)>(
+    let attempts = db::query_as::<(String, Option<String>, String, String)>(
         "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
          WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
     )
@@ -3108,8 +3101,7 @@ pub async fn portal_checkout_detail(
     })
     .unwrap_or_default();
 
-    let mut events: Vec<EventRow> = sqlx::query_as::<
-        _,
+    let mut events: Vec<EventRow> = db::query_as::<
         (String, String, String, i64, String, Option<String>, String),
     >(
         "SELECT id, event_type, status, attempts, next_attempt_at, last_error, payload \
@@ -3136,8 +3128,7 @@ pub async fn portal_checkout_detail(
     })
     .unwrap_or_default();
 
-    let all_deliveries = sqlx::query_as::<
-        _,
+    let all_deliveries = db::query_as::<
         (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
     >(
         "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
@@ -3207,7 +3198,7 @@ pub async fn portal_webhooks(
         return not_found();
     };
 
-    let endpoints = sqlx::query_as::<_, (String, String)>(
+    let endpoints = db::query_as::<(String, String)>(
         "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
     )
     .bind(&merchant_id)
@@ -3220,8 +3211,7 @@ pub async fn portal_webhooks(
     })
     .unwrap_or_default();
 
-    let deliveries = sqlx::query_as::<
-        _,
+    let deliveries = db::query_as::<
         (String, String, String, i64, Option<i64>, Option<String>, String),
     >(
         "SELECT d.id, o.id, o.event_type, d.attempt_no, d.status_code, d.error, d.created_at \
@@ -3277,8 +3267,7 @@ pub async fn portal_delivery_detail(
     };
     // Ownership: only deliveries that went to this merchant's endpoints.
     let Some((outbox_id, attempt_no, status_code, error, duration_ms, created_at)) =
-        sqlx::query_as::<
-            _,
+        db::query_as::<
             (String, i64, Option<i64>, Option<String>, Option<i64>, String),
         >(
             "SELECT d.outbox_id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
@@ -3297,7 +3286,7 @@ pub async fn portal_delivery_detail(
     };
 
     let Some((event_type, event_status, event_attempts, next_attempt_at, last_error, payload)) =
-        sqlx::query_as::<_, (String, String, i64, String, Option<String>, String)>(
+        db::query_as::<(String, String, i64, String, Option<String>, String)>(
             "SELECT event_type, status, attempts, next_attempt_at, last_error, payload \
              FROM outbox_messages WHERE id = ?",
         )
@@ -3310,7 +3299,7 @@ pub async fn portal_delivery_detail(
         return not_found();
     };
 
-    let url = sqlx::query_as::<_, (String,)>(
+    let url = db::query_as::<(String,)>(
         "SELECT url FROM webhook_endpoints WHERE merchant_id = ? AND status = 'active' LIMIT 1",
     )
     .bind(&merchant_id)
@@ -3321,7 +3310,7 @@ pub async fn portal_delivery_detail(
     .map(|(u,)| u)
     .unwrap_or_default();
 
-    let history = sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+    let history = db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
         "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
          FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
     )
@@ -3392,7 +3381,7 @@ pub async fn portal_delivery_retry(
         return not_found();
     };
 
-    let Some((event_id,)): Option<(String,)> = sqlx::query_as(
+    let Some((event_id,)): Option<(String,)> = db::query_as(
         "SELECT d.outbox_id FROM webhook_deliveries d \
          JOIN webhook_endpoints e ON e.id = d.endpoint_id \
          WHERE d.id = ? AND e.merchant_id = ?",
@@ -3407,9 +3396,9 @@ pub async fn portal_delivery_retry(
         return not_found();
     };
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE outbox_messages \
-         SET status = 'pending', attempts = MAX(attempts - 1, 0), next_attempt_at = ? \
+         SET status = 'pending', attempts = CASE WHEN attempts - 1 > 0 THEN attempts - 1 ELSE 0 END, next_attempt_at = ? \
          WHERE id = ?",
     )
     .bind(now_iso())
@@ -3448,7 +3437,7 @@ async fn portal_keys_view(state: &AppState, sess: &SessionInfo, new_key: Option<
         return not_found();
     };
 
-    let keys = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let keys = db::query_as::<(String, String, String, Option<String>)>(
         "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
          WHERE merchant_id = ? ORDER BY created_at DESC",
     )
@@ -3538,7 +3527,7 @@ pub async fn portal_key_revoke(
         return not_found();
     };
 
-    let prefix: Option<(String,)> = sqlx::query_as(
+    let prefix: Option<(String,)> = db::query_as(
         "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ?",
     )
     .bind(&key_id)
@@ -3551,7 +3540,7 @@ pub async fn portal_key_revoke(
         return not_found();
     };
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_api_keys SET revoked_at = ? \
          WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
     )
@@ -3593,7 +3582,7 @@ pub async fn portal_key_rotate(
         return not_found();
     };
 
-    let old: Option<(String,)> = sqlx::query_as(
+    let old: Option<(String,)> = db::query_as(
         "SELECT prefix FROM merchant_api_keys WHERE id = ? AND merchant_id = ? AND revoked_at IS NULL",
     )
     .bind(&key_id)
@@ -3615,7 +3604,7 @@ pub async fn portal_key_rotate(
         Ok(db) => db,
         Err(e) => return db_error(e),
     };
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE merchant_api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
     )
     .bind(now_iso())
@@ -3667,7 +3656,7 @@ pub async fn portal_credits_page(
         return not_found();
     };
 
-    let ledger = sqlx::query_as::<_, (i64, String, Option<String>, String)>(
+    let ledger = db::query_as::<(i64, String, Option<String>, String)>(
         "SELECT delta, reason, checkout_id, created_at FROM credit_ledger \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
@@ -3725,7 +3714,7 @@ pub async fn portal_methods_page(
         return not_found();
     };
 
-    let methods = sqlx::query_as::<_, (String, String, String, String, String)>(
+    let methods = db::query_as::<(String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -3804,7 +3793,7 @@ pub async fn portal_method_create(
         .to_string();
     let instructions = provider_default_instructions(&state.pool, &form.provider).await;
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO merchant_payment_methods \
          (id, merchant_id, provider, display_name, account_identifier, instructions, status, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
@@ -3865,7 +3854,7 @@ pub async fn portal_method_status(
         _ => return bad_request("unknown action"),
     };
 
-    let updated = sqlx::query(
+    let updated = db::query(
         "UPDATE merchant_payment_methods SET status = ? WHERE id = ? AND merchant_id = ?",
     )
     .bind(next_status)
@@ -3922,7 +3911,7 @@ pub async fn portal_method_account(
         return bad_request("receiving account is required");
     }
 
-    let updated = sqlx::query(
+    let updated = db::query(
         "UPDATE merchant_payment_methods SET account_identifier = ? \
          WHERE id = ? AND merchant_id = ?",
     )
@@ -3978,7 +3967,7 @@ pub async fn portal_method_name(
         return bad_request("display name must be 1-60 characters");
     }
 
-    let updated = sqlx::query(
+    let updated = db::query(
         "UPDATE merchant_payment_methods SET display_name = ? WHERE id = ? AND merchant_id = ?",
     )
     .bind(&name)
@@ -4040,7 +4029,7 @@ pub async fn credits_buy(
         Ok(db) => db,
         Err(e) => return db_error(e),
     };
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO checkouts \
          (id, merchant_id, reference, amount_minor, currency, status, return_url, expires_at, created_at, updated_at) \
          VALUES (?, ?, ?, ?, 'ETB', 'created', ?, ?, ?, ?)",
@@ -4058,7 +4047,7 @@ pub async fn credits_buy(
     {
         return db_error(e);
     }
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "INSERT INTO credit_purchases (id, merchant_id, checkout_id, credits, amount_minor, created_at) \
          VALUES (?, ?, ?, ?, ?, ?)",
     )

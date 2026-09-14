@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "tls-rustls-ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -25,6 +25,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 tower-http = { version = "0.6", features = ["fs"] }
+
+[features]
+pg = []
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

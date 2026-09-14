@@ -10,6 +10,7 @@ use utoipa::ToSchema;
 
 use crate::auth::MerchantAuth;
 use crate::error::ApiError;
+use crate::db;
 use crate::ids::{new_id, now_iso};
 use crate::money::{format_minor, number_to_minor};
 use crate::state::AppState;
@@ -237,7 +238,7 @@ pub async fn create_checkout(
 
     // Idempotent replay: same merchant + Idempotency-Key -> same checkout.
     if let Some(key) = idempotency_key(&headers) {
-        if let Some((existing,)) = sqlx::query_as::<_, (String,)>(
+        if let Some((existing,)) = db::query_as::<(String,)>(
             "SELECT checkout_id FROM idempotency_keys WHERE merchant_id = ? AND key = ?",
         )
         .bind(&auth.merchant_id)
@@ -262,7 +263,7 @@ pub async fn create_checkout(
         .map(|(n, e)| (n, e))
         .unwrap_or((None, None));
 
-    sqlx::query(
+    db::query(
         "INSERT INTO checkouts \
          (id, merchant_id, reference, amount_minor, currency, status, customer_name, customer_email, return_url, selected_method_id, expires_at, created_at, updated_at) \
          VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, ?, ?, ?)",
@@ -283,7 +284,7 @@ pub async fn create_checkout(
 
     if let Some(items) = &parsed.items {
         for (name, quantity, unit_price) in items {
-            sqlx::query(
+            db::query(
                 "INSERT INTO checkout_items (id, checkout_id, name, quantity, unit_price_minor) \
                  VALUES (?, ?, ?, ?, ?)",
             )
@@ -301,9 +302,9 @@ pub async fn create_checkout(
     // request that won the race causes our insert to be ignored: we roll back
     // (removing this checkout) and return the winner's.
     if let Some(key) = idempotency_key(&headers) {
-        let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO idempotency_keys (merchant_id, key, checkout_id, created_at) \
-             VALUES (?, ?, ?, ?)",
+        let inserted = db::query(
+            "INSERT INTO idempotency_keys (merchant_id, key, checkout_id, created_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
         )
         .bind(&auth.merchant_id)
         .bind(&key)
@@ -313,7 +314,7 @@ pub async fn create_checkout(
         .await?;
         if inserted.rows_affected() == 0 {
             db.rollback().await?;
-            let (existing,): (String,) = sqlx::query_as(
+            let (existing,): (String,) = db::query_as(
                 "SELECT checkout_id FROM idempotency_keys WHERE merchant_id = ? AND key = ?",
             )
             .bind(&auth.merchant_id)
@@ -357,7 +358,7 @@ pub async fn get_checkout_by_reference(
     Path(reference): Path<String>,
 ) -> Result<Json<CheckoutDto>, ApiError> {
     let reference = reference.trim();
-    let (checkout_id,): (String,) = sqlx::query_as(
+    let (checkout_id,): (String,) = db::query_as(
         "SELECT id FROM checkouts \
          WHERE merchant_id = ? AND reference = ? \
          ORDER BY created_at DESC LIMIT 1",
@@ -396,7 +397,7 @@ pub async fn get_checkout_by_transaction(
     Path(transaction_reference): Path<String>,
 ) -> Result<Json<CheckoutDto>, ApiError> {
     let transaction_reference = transaction_reference.trim();
-    let (checkout_id,): (String,) = sqlx::query_as(
+    let (checkout_id,): (String,) = db::query_as(
         "SELECT c.id FROM checkouts c \
          JOIN payments p ON p.checkout_id = c.id \
          JOIN transactions t ON t.payment_id = p.id \
@@ -437,7 +438,7 @@ pub async fn get_checkout(
 ) -> Result<Json<CheckoutDto>, ApiError> {
     // Ownership check before loading: merchants must only see their own
     // checkouts (mismatches return the same 404 as unknown ids).
-    let owner = sqlx::query_as::<_, (String,)>(
+    let owner = db::query_as::<(String,)>(
         "SELECT merchant_id FROM checkouts WHERE id = ?",
     )
     .bind(&checkout_id)
@@ -457,8 +458,7 @@ pub async fn load_checkout_dto(
     state: &AppState,
     checkout_id: &str,
 ) -> Result<Option<CheckoutDto>, sqlx::Error> {
-    let row = sqlx::query_as::<
-        _,
+    let row = db::query_as::<
         (
             String,
             String,
@@ -501,7 +501,7 @@ pub async fn load_checkout_dto(
         return Ok(None);
     };
 
-    let items = sqlx::query_as::<_, (String, i64, i64)>(
+    let items = db::query_as::<(String, i64, i64)>(
         "SELECT name, quantity, unit_price_minor FROM checkout_items WHERE checkout_id = ? ORDER BY id",
     )
     .bind(&id)
@@ -523,7 +523,7 @@ pub async fn load_checkout_dto(
     };
 
     let payment_method = match &selected_method_id {
-        Some(method_id) => sqlx::query_as::<_, (String, String)>(
+        Some(method_id) => db::query_as::<(String, String)>(
             "SELECT provider, display_name FROM merchant_payment_methods WHERE id = ?",
         )
         .bind(method_id)
@@ -533,7 +533,7 @@ pub async fn load_checkout_dto(
         None => None,
     };
 
-    let transaction_reference = sqlx::query_as::<_, (String,)>(
+    let transaction_reference = db::query_as::<(String,)>(
         "SELECT t.transaction_reference FROM transactions t \
          JOIN payments p ON p.id = t.payment_id \
          WHERE p.checkout_id = ? AND p.status = 'succeeded' \
@@ -544,7 +544,7 @@ pub async fn load_checkout_dto(
     .await?
     .map(|(r,)| r);
 
-    let (attempts,) = sqlx::query_as::<_, (i64,)>(
+    let (attempts,) = db::query_as::<(i64,)>(
         "SELECT COUNT(*) FROM payment_attempts WHERE checkout_id = ? AND outcome != 'verification_service_error'",
     )
     .bind(&id)

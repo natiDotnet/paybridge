@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::db;
 use crate::ids::{new_id, now_iso, to_iso};
 use crate::state::AppState;
 
@@ -25,7 +26,7 @@ fn last_error_text(status_code: Option<i64>, error: &Option<String>) -> String {
 }
 
 pub async fn deliver_due_events(state: &AppState) -> usize {
-    let due = match sqlx::query_as::<_, (String, String, String, i64)>(
+    let due = match db::query_as::<(String, String, String, i64)>(
         "SELECT id, aggregate_id, payload, attempts FROM outbox_messages \
          WHERE status = 'pending' AND next_attempt_at <= ? \
          ORDER BY next_attempt_at LIMIT 20",
@@ -43,7 +44,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
 
     let mut processed = 0;
     for (outbox_id, checkout_id, payload, attempts) in due {
-        let endpoint = sqlx::query_as::<_, (String, String, String)>(
+        let endpoint = db::query_as::<(String, String, String)>(
             "SELECT e.id, e.url, e.secret FROM webhook_endpoints e \
              JOIN checkouts c ON c.merchant_id = e.merchant_id \
              WHERE c.id = ? AND e.status = 'active' LIMIT 1",
@@ -61,7 +62,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
         };
 
         let Some((endpoint_id, url, secret)) = endpoint else {
-            let _ = sqlx::query(
+            let _ = db::query(
                 "UPDATE outbox_messages SET status = 'dead', last_error = 'no active webhook endpoint' WHERE id = ?",
             )
             .bind(&outbox_id)
@@ -91,7 +92,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
             Err(e) => (None, Some(e.to_string())),
         };
 
-        let _ = sqlx::query(
+        let _ = db::query(
             "INSERT INTO webhook_deliveries (id, outbox_id, endpoint_id, attempt_no, status_code, error, duration_ms, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -108,7 +109,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
 
         let success = status_code.map(|c| (200..300).contains(&c)).unwrap_or(false);
         if success {
-            let _ = sqlx::query("UPDATE outbox_messages SET status = 'delivered', attempts = ?, last_error = NULL WHERE id = ?")
+            let _ = db::query("UPDATE outbox_messages SET status = 'delivered', attempts = ?, last_error = NULL WHERE id = ?")
                 .bind(attempt_no)
                 .bind(&outbox_id)
                 .execute(&state.pool)
@@ -126,7 +127,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
                                 .unwrap_or_else(|_| chrono::Duration::seconds(30)),
                     );
                     let detail = last_error_text(status_code, &error);
-                    let _ = sqlx::query(
+                    let _ = db::query(
                         "UPDATE outbox_messages SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?",
                     )
                     .bind(attempt_no)
@@ -142,7 +143,7 @@ pub async fn deliver_due_events(state: &AppState) -> usize {
                 }
                 None => {
                     let detail = last_error_text(status_code, &error);
-                    let _ = sqlx::query(
+                    let _ = db::query(
                         "UPDATE outbox_messages SET status = 'dead', attempts = ?, last_error = ? WHERE id = ?",
                     )
                     .bind(attempt_no)

@@ -8,6 +8,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::error::ApiError;
+use crate::db;
 use crate::state::AppState;
 
 pub struct MerchantAuth {
@@ -40,7 +41,7 @@ impl FromRequestParts<AppState> for MerchantAuth {
 
         let prefix = &token[..12];
         let hash = sha256_hex(token);
-        let row = sqlx::query_as::<_, (String, String, i64)>(
+        let row = db::query_as::<(String, String, i64)>(
             "SELECT k.merchant_id, m.name, m.credit_balance \
              FROM merchant_api_keys k \
              JOIN merchants m ON m.id = k.merchant_id \

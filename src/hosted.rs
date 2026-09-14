@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::domain::{self, VerifyResult};
+use crate::db;
 use crate::ids::new_id;
 use crate::money::format_minor;
 use crate::state::AppState;
@@ -229,7 +230,7 @@ pub async fn checkout_page(
         Err(e) => return db_error_page(e),
     };
 
-    let merchant_name = sqlx::query_as::<_, (String,)>("SELECT name FROM merchants WHERE id = ?")
+    let merchant_name = db::query_as::<(String,)>("SELECT name FROM merchants WHERE id = ?")
         .bind(&checkout.merchant_id)
         .fetch_one(&state.pool)
         .await
@@ -238,7 +239,7 @@ pub async fn checkout_page(
 
     let amount_display = format!("{} {}", format_minor(checkout.amount_minor), checkout.currency);
 
-    let item_rows = sqlx::query_as::<_, (String, i64, i64)>(
+    let item_rows = db::query_as::<(String, i64, i64)>(
         "SELECT name, quantity, unit_price_minor FROM checkout_items WHERE checkout_id = ? ORDER BY id",
     )
     .bind(&checkout.id)
@@ -265,7 +266,7 @@ pub async fn checkout_page(
     let show_methods = needs_methods || (wants_change && checkout.status == "pending");
     let mut methods = Vec::new();
     if show_methods {
-        match sqlx::query_as::<_, (String, String)>(
+        match db::query_as::<(String, String)>(
             "SELECT id, display_name FROM merchant_payment_methods \
              WHERE merchant_id = ? AND status = 'active' ORDER BY created_at",
         )
@@ -290,7 +291,7 @@ pub async fn checkout_page(
     }
     // Provider logos come from the static dir, keyed by the method's provider.
     if show_methods {
-        let provider_rows = sqlx::query_as::<_, (String, String)>(
+        let provider_rows = db::query_as::<(String, String)>(
             "SELECT id, provider FROM merchant_payment_methods \
              WHERE merchant_id = ? AND status = 'active' ORDER BY created_at",
         )
@@ -325,7 +326,7 @@ pub async fn checkout_page(
     let has_slides = !slides.is_empty();
 
     let paid_reference = if checkout.status == "succeeded" {
-        sqlx::query_as::<_, (String,)>(
+        db::query_as::<(String,)>(
             "SELECT t.transaction_reference FROM transactions t \
              JOIN payments p ON p.id = t.payment_id \
              WHERE p.checkout_id = ? AND p.status = 'succeeded' \
@@ -445,7 +446,7 @@ pub async fn select_method(
         return see_other(format!("/c/{checkout_id}"));
     }
 
-    if let Err(e) = sqlx::query(
+    if let Err(e) = db::query(
         "UPDATE checkouts SET selected_method_id = ?, \
          status = CASE WHEN status = 'created' THEN 'pending' ELSE status END, updated_at = ? \
          WHERE id = ? AND status IN ('created', 'pending')",

@@ -166,6 +166,25 @@ The expected contract is [docs/VERIFICATION_SERVICE_CONTRACT.md](docs/VERIFICATI
 only `src/verify/http.rs` needs touching if it differs. **The `recipient` field must be
 the exact receiving wallet (unmasked) — the recipient_mismatch rule depends on it.**
 
+## SQLite (dev) vs PostgreSQL (production)
+
+The codebase runs on either database, selected at compile time:
+
+```bash
+cargo run                                # SQLite (default) — paybridge.db, auto-migrated
+cargo run --features pg                  # PostgreSQL — DATABASE_URL must point at it
+```
+
+- Queries are written once in the SQLite dialect; the pg build rewrites `?`
+  placeholders to `$1..$n` automatically (see `src/db.rs`).
+- The Postgres schema lives in `migrations_postgres/0001_schema.sql` (BIGINT
+  mirrors SQLite INTEGER so `i64` columns decode on both drivers). It is
+  embedded in the pg build and applied automatically on startup.
+- Dialect notes: `OR IGNORE` became `ON CONFLICT DO NOTHING`, the webhook
+  retry decrement uses `CASE WHEN` (portable), and sums are `CAST` to BIGINT.
+- Required PG seeds for the credit flow (the PayBridge Credits platform
+  merchant and per-provider customer steps) are included in the schema file.
+
 ## Tests
 
 ```bash

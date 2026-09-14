@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use crate::db;
 use crate::ids::now_iso;
 use crate::state::AppState;
 use crate::webhooks;
@@ -20,7 +21,7 @@ pub async fn expiry_sweeper(state: AppState) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        match sqlx::query(
+        match db::query(
             "UPDATE checkouts SET status = 'expired', updated_at = ? \
              WHERE status IN ('created', 'pending') AND expires_at <= ?",
         )
