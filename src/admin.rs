@@ -341,6 +341,9 @@ pub fn portal_router(state: AppState) -> Router<AppState> {
         .route("/checkouts", get(portal_checkouts))
         .route("/checkouts/{checkout_id}", get(portal_checkout_detail))
         .route("/webhooks", get(portal_webhooks))
+        .route("/webhooks/endpoints", post(portal_webhook_create))
+        .route("/webhooks/endpoints/{endpoint_id}/status", post(portal_webhook_status))
+        .route("/webhooks/endpoints/{endpoint_id}/secret", post(portal_webhook_secret))
         .route("/webhooks/deliveries/{delivery_id}", get(portal_delivery_detail))
         .route(
             "/webhooks/deliveries/{delivery_id}/retry",
@@ -844,7 +847,7 @@ async fn merchant_page(
         return not_found();
     };
 
-    let methods = db::query_as::<(String, String, String, String, String, String)>(
+    let methods = match db::query_as::<(String, String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -867,9 +870,12 @@ async fn merchant_page(
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let keys = db::query_as::<(String, String, String, Option<String>)>(
+    let keys = match db::query_as::<(String, String, String, Option<String>)>(
         "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
          WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -886,9 +892,12 @@ async fn merchant_page(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let endpoints = db::query_as::<(String, String)>(
+    let endpoints = match db::query_as::<(String, String)>(
         "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
     )
     .bind(merchant_id)
@@ -899,9 +908,12 @@ async fn merchant_page(
             .map(|(url, status)| MerchantEndpointRow { url, status })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let checkouts = db::query_as::<(String, String, i64, String, String)>(
+    let checkouts = match db::query_as::<(String, String, i64, String, String)>(
         "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
     )
@@ -919,7 +931,10 @@ async fn merchant_page(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -1709,12 +1724,15 @@ pub async fn checkouts(
     Extension(sess): Extension<SessionInfo>,
     Query(f): Query<CheckoutFilters>,
 ) -> Response {
-    let merchants = db::query_as::<(String, String)>(
+    let merchants = match db::query_as::<(String, String)>(
         "SELECT id, name FROM merchants ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     let q = f.q.unwrap_or_default().trim().to_string();
     let status = f.status.unwrap_or_default();
@@ -1981,7 +1999,7 @@ pub async fn checkout_detail(
         occurred_at,
     });
 
-    let attempts = db::query_as::<(String, Option<String>, String, String)>(
+    let attempts = match db::query_as::<(String, Option<String>, String, String)>(
         "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
          WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
     )
@@ -1998,7 +2016,10 @@ pub async fn checkout_detail(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     let mut events: Vec<EventRow> = db::query_as::<
         (String, String, String, i64, String, Option<String>, String),
@@ -2028,7 +2049,7 @@ pub async fn checkout_detail(
     .unwrap_or_default();
 
     // All delivery attempts for this checkout's events, grouped per event.
-    let all_deliveries = db::query_as::<
+    let all_deliveries = match db::query_as::<
         (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
     >(
         "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
@@ -2038,7 +2059,10 @@ pub async fn checkout_detail(
     .bind(&checkout_id)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
     for (outbox_id, delivery_id, attempt_no, status_code, error, duration_ms, created_at) in
         all_deliveries
     {
@@ -2121,7 +2145,7 @@ pub struct WebhooksPage {
 }
 
 pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
-    let endpoints = db::query_as::<(String, String, String, String)>(
+    let endpoints = match db::query_as::<(String, String, String, String)>(
         "SELECT e.id, m.name, e.url, e.status \
          FROM webhook_endpoints e JOIN merchants m ON m.id = e.merchant_id \
          ORDER BY m.name, e.created_at",
@@ -2138,9 +2162,12 @@ pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let deliveries = db::query_as::<
+    let deliveries = match db::query_as::<
         (String, String, String, String, i64, Option<i64>, Option<String>, String),
     >(
         "SELECT d.id, o.id, o.event_type, m.name, d.attempt_no, d.status_code, d.error, d.created_at \
@@ -2170,7 +2197,10 @@ pub async fn webhooks(State(state): State<AppState>, Extension(sess): Extension<
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -2256,7 +2286,7 @@ pub async fn delivery_detail(
     .flatten()
     .unwrap_or_else(|| ("?".into(), "?".into()));
 
-    let history = db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+    let history = match db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
         "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
          FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
     )
@@ -2277,7 +2307,10 @@ pub async fn delivery_detail(
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -2392,7 +2425,7 @@ pub struct AuditPage {
 }
 
 pub async fn audit_page(State(state): State<AppState>, Extension(sess): Extension<SessionInfo>) -> Response {
-    let rows = db::query_as::<
+    let rows = match db::query_as::<
         (String, String, String, String, Option<String>, Option<String>, String),
     >(
         "SELECT actor, action, resource, resource_id, ip, metadata, created_at \
@@ -2415,7 +2448,10 @@ pub async fn audit_page(State(state): State<AppState>, Extension(sess): Extensio
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -2454,7 +2490,7 @@ pub async fn users_page(
     if !can(&sess.user.role, &Cap::ManageUsers) {
         return forbidden();
     }
-    let rows = db::query_as::<
+    let rows = match db::query_as::<
         (String, String, String, String, Option<String>, String, String),
     >(
         "SELECT u.id, u.email, u.name, u.role, m.name, u.status, u.created_at \
@@ -2478,13 +2514,19 @@ pub async fn users_page(
             )
             .collect()
     })
-    .unwrap_or_default();
-    let merchants = db::query_as::<(String, String)>(
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
+    let merchants = match db::query_as::<(String, String)>(
         "SELECT id, name FROM merchants ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -2730,6 +2772,12 @@ pub struct PortalDeliveryListRow {
     pub created_at: String,
 }
 
+pub struct PortalEndpointRow {
+    pub endpoint_id: String,
+    pub url: String,
+    pub status: String,
+}
+
 #[derive(Template)]
 #[template(path = "portal_webhooks.html")]
 pub struct PortalWebhooksPage {
@@ -2738,8 +2786,20 @@ pub struct PortalWebhooksPage {
     pub email: String,
     pub merchant_name: String,
     pub credits: i64,
-    pub endpoints: Vec<MerchantEndpointRow>,
+    pub endpoints: Vec<PortalEndpointRow>,
+    pub events: Vec<PortalEventRow>,
     pub deliveries: Vec<PortalDeliveryListRow>,
+    /// A freshly generated signing secret, rendered exactly once.
+    pub new_secret: Option<String>,
+}
+
+pub struct PortalEventRow {
+    pub event_id: String,
+    pub event_type: String,
+    pub status: String,
+    pub attempts: i64,
+    pub next_attempt_at: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Template)]
@@ -2837,7 +2897,7 @@ pub async fn portal_home(
     .await
     .unwrap_or((0,));
 
-    let recent = db::query_as::<(String, String, i64, String, String)>(
+    let recent = match db::query_as::<(String, String, i64, String, String)>(
         "SELECT id, reference, amount_minor, status, created_at FROM checkouts \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 10",
     )
@@ -2855,9 +2915,12 @@ pub async fn portal_home(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let methods = db::query_as::<(String, String, String, String, String, String)>(
+    let methods = match db::query_as::<(String, String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, instructions, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -2880,7 +2943,10 @@ pub async fn portal_home(
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -3082,7 +3148,7 @@ pub async fn portal_checkout_detail(
         occurred_at,
     });
 
-    let attempts = db::query_as::<(String, Option<String>, String, String)>(
+    let attempts = match db::query_as::<(String, Option<String>, String, String)>(
         "SELECT outcome, detail, transaction_reference, created_at FROM payment_attempts \
          WHERE checkout_id = ? ORDER BY created_at DESC LIMIT 20",
     )
@@ -3099,7 +3165,10 @@ pub async fn portal_checkout_detail(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     let mut events: Vec<EventRow> = db::query_as::<
         (String, String, String, i64, String, Option<String>, String),
@@ -3128,7 +3197,7 @@ pub async fn portal_checkout_detail(
     })
     .unwrap_or_default();
 
-    let all_deliveries = db::query_as::<
+    let all_deliveries = match db::query_as::<
         (String, String, i64, Option<i64>, Option<String>, Option<i64>, String),
     >(
         "SELECT d.outbox_id, d.id, d.attempt_no, d.status_code, d.error, d.duration_ms, d.created_at \
@@ -3138,7 +3207,10 @@ pub async fn portal_checkout_detail(
     .bind(&checkout_id)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
     for (outbox_id, delivery_id, attempt_no, status_code, error, duration_ms, created_at) in
         all_deliveries
     {
@@ -3194,24 +3266,68 @@ pub async fn portal_webhooks(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
 ) -> Response {
-    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(&state, &sess).await else {
+    portal_webhooks_view(&state, &sess, None).await
+}
+
+async fn portal_webhooks_view(
+    state: &AppState,
+    sess: &SessionInfo,
+    new_secret: Option<String>,
+) -> Response {
+    let Some((merchant_id, merchant_name, _, credits)) = portal_merchant(state, sess).await else {
         return not_found();
     };
 
-    let endpoints = db::query_as::<(String, String)>(
-        "SELECT url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
+    let endpoints = match db::query_as::<(String, String, String)>(
+        "SELECT id, url, status FROM webhook_endpoints WHERE merchant_id = ? ORDER BY created_at",
     )
     .bind(&merchant_id)
     .fetch_all(&state.pool)
     .await
     .map(|rows| {
         rows.into_iter()
-            .map(|(url, status)| MerchantEndpointRow { url, status })
+            .map(|(endpoint_id, url, status)| PortalEndpointRow {
+                endpoint_id,
+                url,
+                status,
+            })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
-    let deliveries = db::query_as::<
+    // All payment events for this merchant's checkouts, including
+    // dead-lettered ones that never produced a delivery row.
+    let events = match db::query_as::<
+        (String, String, String, i64, String, Option<String>),
+    >(
+        "SELECT o.id, o.event_type, o.status, o.attempts, o.next_attempt_at, o.last_error          FROM outbox_messages o          JOIN checkouts c ON c.id = o.aggregate_id          WHERE c.merchant_id = ?          ORDER BY o.created_at DESC LIMIT 50",
+    )
+    .bind(&merchant_id)
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(event_id, event_type, status, attempts, next_attempt_at, last_error)| {
+                PortalEventRow {
+                    event_id,
+                    event_type,
+                    status,
+                    attempts,
+                    next_attempt_at,
+                    last_error,
+                }
+            })
+            .collect()
+    })
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
+
+    let deliveries = match db::query_as::<
         (String, String, String, i64, Option<i64>, Option<String>, String),
     >(
         "SELECT d.id, o.id, o.event_type, d.attempt_no, d.status_code, d.error, d.created_at \
@@ -3241,7 +3357,10 @@ pub async fn portal_webhooks(
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -3252,9 +3371,214 @@ pub async fn portal_webhooks(
             merchant_name,
             credits,
             endpoints,
+            events,
             deliveries,
+            new_secret,
         },
     )
+}
+
+// --- portal: webhook endpoint self-service -------------------------------------
+// Merchants register their own delivery URL. One ACTIVE endpoint per merchant
+// (the dispatcher delivers to a single active endpoint); signing secrets are
+// generated server-side and shown exactly once.
+
+fn generate_webhook_secret() -> String {
+    format!("whsec_{}{}", ulid::Ulid::new(), ulid::Ulid::new())
+}
+
+fn valid_webhook_url(raw: &str) -> Result<String, Response> {
+    let trimmed = raw.trim().to_string();
+    let parsed = url::Url::parse(&trimmed)
+        .map_err(|_| bad_request("endpoint URL must be an absolute http(s) URL"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(bad_request("endpoint URL must be http(s)"));
+    }
+    if trimmed.len() > 500 {
+        return Err(bad_request("endpoint URL is too long"));
+    }
+    Ok(trimmed)
+}
+
+#[derive(Deserialize)]
+pub struct PortalWebhookCreateForm {
+    pub csrf: String,
+    pub url: String,
+}
+
+/// Register the merchant's webhook endpoint. A signing secret is generated
+/// and shown once — deliveries are signed with `X-PayBridge-Signature`.
+pub async fn portal_webhook_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<PortalWebhookCreateForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let url = match valid_webhook_url(&form.url) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+
+    let (active,): (i64,) = db::query_as(
+        "SELECT COUNT(*) FROM webhook_endpoints WHERE merchant_id = ? AND status = 'active'",
+    )
+    .bind(&merchant_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or((0,));
+    if active > 0 {
+        return bad_request("an active endpoint already exists — disable it before registering another");
+    }
+
+    let secret = generate_webhook_secret();
+    if let Err(e) = db::query(
+        "INSERT INTO webhook_endpoints (id, merchant_id, url, secret, status, created_at) \
+         VALUES (?, ?, ?, ?, 'active', ?)",
+    )
+    .bind(new_id("wh"))
+    .bind(&merchant_id)
+    .bind(&url)
+    .bind(&secret)
+    .bind(now_iso())
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "webhook_endpoint.created",
+        "merchant",
+        &merchant_id,
+        Some(format!("{{\"url\":\"{url}\",\"self\":true}}")),
+    )
+    .await;
+
+    portal_webhooks_view(&state, &sess, Some(secret)).await
+}
+
+#[derive(Deserialize)]
+pub struct PortalWebhookStatusForm {
+    pub csrf: String,
+    pub action: String,
+}
+
+/// Enable/disable one of the merchant's own endpoints.
+pub async fn portal_webhook_status(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(endpoint_id): Path<String>,
+    Form(form): Form<PortalWebhookStatusForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+    let next_status = match form.action.as_str() {
+        "enable" => "active",
+        "disable" => "disabled",
+        _ => return bad_request("unknown action"),
+    };
+
+    let updated = db::query(
+        "UPDATE webhook_endpoints SET status = ? WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(next_status)
+    .bind(&endpoint_id)
+    .bind(&merchant_id)
+    .execute(&state.pool)
+    .await;
+    let Ok(updated) = updated else {
+        return db_error(updated.err().unwrap());
+    };
+    if updated.rows_affected() == 0 {
+        return not_found();
+    }
+
+    let action =
+        if next_status == "active" { "webhook_endpoint.enabled" } else { "webhook_endpoint.disabled" };
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        action,
+        "webhook_endpoint",
+        &endpoint_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"self\":true}}")),
+    )
+    .await;
+
+    Redirect::to("/portal/webhooks").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PortalWebhookSecretForm {
+    pub csrf: String,
+}
+
+/// Rotate the endpoint's signing secret. The old secret stops verifying
+/// immediately; the new one is shown once.
+pub async fn portal_webhook_secret(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Path(endpoint_id): Path<String>,
+    Form(form): Form<PortalWebhookSecretForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some((merchant_id, _, _, _)) = portal_merchant(&state, &sess).await else {
+        return not_found();
+    };
+
+    let exists: Option<(String,)> = db::query_as(
+        "SELECT id FROM webhook_endpoints WHERE id = ? AND merchant_id = ?",
+    )
+    .bind(&endpoint_id)
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    if exists.is_none() {
+        return not_found();
+    }
+
+    let secret = generate_webhook_secret();
+    if let Err(e) = db::query("UPDATE webhook_endpoints SET secret = ? WHERE id = ?")
+        .bind(&secret)
+        .bind(&endpoint_id)
+        .execute(&state.pool)
+        .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "webhook_endpoint.secret_rotated",
+        "webhook_endpoint",
+        &endpoint_id,
+        Some(format!("{{\"merchant\":\"{merchant_id}\",\"self\":true}}")),
+    )
+    .await;
+
+    portal_webhooks_view(&state, &sess, Some(secret)).await
 }
 
 pub async fn portal_delivery_detail(
@@ -3310,7 +3634,7 @@ pub async fn portal_delivery_detail(
     .map(|(u,)| u)
     .unwrap_or_default();
 
-    let history = db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
+    let history = match db::query_as::<(String, i64, Option<i64>, Option<String>, Option<i64>, String)>(
         "SELECT id, attempt_no, status_code, error, duration_ms, created_at \
          FROM webhook_deliveries WHERE outbox_id = ? ORDER BY attempt_no",
     )
@@ -3331,7 +3655,10 @@ pub async fn portal_delivery_detail(
             )
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -3437,7 +3764,7 @@ async fn portal_keys_view(state: &AppState, sess: &SessionInfo, new_key: Option<
         return not_found();
     };
 
-    let keys = db::query_as::<(String, String, String, Option<String>)>(
+    let keys = match db::query_as::<(String, String, String, Option<String>)>(
         "SELECT id, prefix, created_at, revoked_at FROM merchant_api_keys \
          WHERE merchant_id = ? ORDER BY created_at DESC",
     )
@@ -3454,7 +3781,10 @@ async fn portal_keys_view(state: &AppState, sess: &SessionInfo, new_key: Option<
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -3656,7 +3986,7 @@ pub async fn portal_credits_page(
         return not_found();
     };
 
-    let ledger = db::query_as::<(i64, String, Option<String>, String)>(
+    let ledger = match db::query_as::<(i64, String, Option<String>, String)>(
         "SELECT delta, reason, checkout_id, created_at FROM credit_ledger \
          WHERE merchant_id = ? ORDER BY created_at DESC LIMIT 50",
     )
@@ -3673,7 +4003,10 @@ pub async fn portal_credits_page(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,
@@ -3714,7 +4047,7 @@ pub async fn portal_methods_page(
         return not_found();
     };
 
-    let methods = db::query_as::<(String, String, String, String, String)>(
+    let methods = match db::query_as::<(String, String, String, String, String)>(
         "SELECT id, provider, display_name, account_identifier, status \
          FROM merchant_payment_methods WHERE merchant_id = ? ORDER BY created_at",
     )
@@ -3735,7 +4068,10 @@ pub async fn portal_methods_page(
             })
             .collect()
     })
-    .unwrap_or_default();
+     {
+        Ok(v) => v,
+        Err(e) => return db_error(e),
+    };
 
     page(
         StatusCode::OK,

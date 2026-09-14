@@ -1214,6 +1214,117 @@ async fn portal_scoping() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(headers["location"], "/portal", "merchant bounced out of /admin");
 
+    // Single-active-endpoint rule: the seeded endpoint must be disabled first.
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/webhooks/endpoints/wh_admin_test/status",
+            &format!("csrf={owner_csrf}&action=disable"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "disable seeded endpoint");
+
+    // --- merchant registers own webhook endpoint (secret shown once) --------------
+    let (status, body, _) = call(
+        &app,
+        post(
+            "/portal/webhooks/endpoints",
+            &format!("csrf={owner_csrf}&url=https://acme.test/api/payment/webhook"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "endpoint register: {body}");
+    let secret_start = body.find("it will not be shown again").expect("reveal missing");
+    let rest = &body[secret_start..];
+    let cs = rest.find("<code>").unwrap() + 6;
+    let ce = rest[cs..].find("</code>").unwrap() + cs;
+    let whsec = rest[cs..ce].trim().to_string();
+    assert!(whsec.starts_with("whsec_"), "signing secret: {whsec}");
+    let (wh_id, wh_status): (String, String) = sqlx::query_as(
+        "SELECT id, status FROM webhook_endpoints WHERE merchant_id = ? AND url = 'https://acme.test/api/payment/webhook'",
+    )
+    .bind(MERCHANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wh_status, "active");
+
+    // A second ACTIVE endpoint is refused while one exists.
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/webhooks/endpoints",
+            &format!("csrf={owner_csrf}&url=https://acme.test/other"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "duplicate active endpoint refused");
+
+    // Disable it, re-enable it — status flips are scoped and audited.
+    let (status, _, _) = call(
+        &app,
+        post(
+            &format!("/portal/webhooks/endpoints/{wh_id}/status"),
+            &format!("csrf={owner_csrf}&action=disable"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (disabled,): (String,) = sqlx::query_as(
+        "SELECT status FROM webhook_endpoints WHERE id = ?",
+    )
+    .bind(&wh_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(disabled, "disabled");
+
+    // Rotate the signing secret.
+    let (status, body, _) = call(
+        &app,
+        post(
+            &format!("/portal/webhooks/endpoints/{wh_id}/secret"),
+            &format!("csrf={owner_csrf}"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "secret rotate: {body}");
+    let rotated = {
+        let marker = "it will not be shown again";
+        let start = body.find(marker).expect("reveal missing") + marker.len();
+        let rest = &body[start..];
+        let cs = rest.find("<code>").unwrap() + 6;
+        let ce = rest[cs..].find("</code>").unwrap() + cs;
+        rest[cs..ce].trim().to_string()
+    };
+    assert!(rotated.starts_with("whsec_") && rotated != whsec);
+
+    for action in [
+        "webhook_endpoint.created",
+        "webhook_endpoint.disabled",
+        "webhook_endpoint.secret_rotated",
+    ] {
+        let (rows,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = ?",
+        )
+        .bind(action)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(rows >= 1, "audit trail missing {action}");
+    }
+
     // --- new providers: BoA via the portal, Dashen straight into the CHECK --------
     let (status, _, _) = call(
         &app,

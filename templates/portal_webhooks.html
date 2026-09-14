@@ -3,18 +3,55 @@
 {% block content %}
 <h1>Webhooks</h1>
 
+{% match new_secret %}{% when Some with (secret) %}
+<div class="key-reveal">
+  <b>New signing secret &mdash; copy it now, it will not be shown again</b>
+  <code>{{ secret }}</code>
+</div>
+{% when None %}{% endmatch %}
+
 <p class="section-label">Endpoints</p>
 <div class="card">
   {% if endpoints.is_empty() %}
-  <p class="empty">No webhook endpoint yet — contact the PayBridge team to register one.</p>
+  <p class="empty">No webhook endpoint yet &mdash; register one below to start receiving
+  payment events.</p>
   {% else %}
   <table>
-    <tr><th>URL</th><th>Status</th></tr>
+    <tr><th>URL</th><th>Status</th><th>Actions</th></tr>
     {% for e in endpoints %}
-    <tr><td class="id">{{ e.url }}</td><td><span class="st st-{{ e.status }}">{{ e.status }}</span></td></tr>
+    <tr>
+      <td class="id">{{ e.url }}<br /><span class="id">{{ e.endpoint_id }}</span></td>
+      <td><span class="st st-{{ e.status }}">{{ e.status }}</span></td>
+      <td>
+        <form class="inline" method="post" action="/portal/webhooks/endpoints/{{ e.endpoint_id }}/secret">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <button class="act" type="submit">Rotate secret</button>
+        </form>
+        <form class="inline" method="post" action="/portal/webhooks/endpoints/{{ e.endpoint_id }}/status">
+          <input type="hidden" name="csrf" value="{{ csrf }}" />
+          <input type="hidden" name="action" value="{% if e.status == "active" %}disable{% else %}enable{% endif %}" />
+          <button class="act {% if e.status == "active" %}danger{% endif %}" type="submit">
+            {% if e.status == "active" %}Disable{% else %}Enable{% endif %}
+          </button>
+        </form>
+      </td>
+    </tr>
     {% endfor %}
   </table>
+  <p class="empty">Only one endpoint can be active at a time. Each successful payment event is
+  POSTed as JSON with an <span class="id">X-PayBridge-Signature: sha256=HMAC(secret, raw_body)</span>
+  header &mdash; verify it before trusting the payload, and dedupe on the
+  <span class="id">X-PayBridge-Event-Id</span> header (retries are possible).</p>
   {% endif %}
+</div>
+
+<p class="section-label">Register an endpoint</p>
+<div class="card">
+  <form class="filters" method="post" action="/portal/webhooks/endpoints">
+    <input type="hidden" name="csrf" value="{{ csrf }}" />
+    <input type="text" name="url" placeholder="https://yourapp.example.com/api/payment/webhook" required />
+    <button type="submit">Register endpoint</button>
+  </form>
 </div>
 
 <p class="section-label">Recent deliveries</p>
