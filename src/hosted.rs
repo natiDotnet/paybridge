@@ -45,9 +45,16 @@ fn simple_page(status: StatusCode, message: &str) -> Response {
     (
         status,
         Html(format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>PayBridge</title></head>\
-             <body style=\"font-family:system-ui;display:flex;justify-content:center;padding:60px 20px\">\
-             <div><h1>PayBridge</h1><p>{message}</p></div></body></html>"
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>PayBridge</title><style>\
+             body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;\
+             background:#f7f5f2;color:#1c1917;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}}\
+             .panel{{background:#fff;border:1px solid #e9e5df;border-radius:16px;padding:32px;max-width:380px;width:100%;\
+             box-shadow:0 1px 2px rgba(28,25,23,.05),0 16px 40px -24px rgba(28,25,23,.18);text-align:center}}\
+             .mark{{color:#0f766e;font-weight:700;font-size:15px;letter-spacing:-.01em;margin-bottom:18px}}\
+             p{{margin:0;font-size:14.5px;line-height:1.55;color:#57534e}}</style></head>\
+             <body><main class=\"panel\"><div class=\"mark\">PayBridge</div><p>{message}</p></main></body></html>"
         )),
     )
         .into_response()
@@ -64,6 +71,10 @@ pub struct CheckoutPage {
     pub merchant_name: String,
     pub reference: String,
     pub amount_display: String,
+    /// The amount alone ("500.00"), for typography that separates the number
+    /// from the currency code on the checkout surface.
+    pub amount_number: String,
+    pub currency: String,
     pub checkout_id: String,
     pub csrf: String,
     /// 1 = choose method, 2 = pay + verify, 3 = done.
@@ -238,6 +249,7 @@ pub async fn checkout_page(
         .unwrap_or_else(|_| "Merchant".to_string());
 
     let amount_display = format!("{} {}", format_minor(checkout.amount_minor), checkout.currency);
+    let amount_number = format_minor(checkout.amount_minor);
 
     let item_rows = db::query_as::<(String, i64, i64)>(
         "SELECT name, quantity, unit_price_minor FROM checkout_items WHERE checkout_id = ? ORDER BY id",
@@ -371,6 +383,8 @@ pub async fn checkout_page(
         merchant_name,
         reference: checkout.reference.clone(),
         amount_display,
+        amount_number,
+        currency: checkout.currency.clone(),
         checkout_id: checkout.id.clone(),
         csrf: csrf.clone(),
         step,

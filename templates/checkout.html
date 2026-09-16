@@ -2,468 +2,1168 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="theme-color" content="#f7f5f2" />
   <title>{{ merchant_name }} — Checkout {{ reference }}</title>
   {% match redirect_url %}{% when Some with (url) %}
   <meta http-equiv="refresh" content="5; url={{ url }}" />
   {% when None %}{% endmatch %}
   <style>
+    /* ============================================================
+       PayBridge checkout — design tokens
+       Warm neutral surface, one teal brand accent, quiet depth.
+       ============================================================ */
     :root {
-      --ink: #111827;
-      --muted: #6b7280;
-      --line: #e5e7eb;
-      --brand: #047857;
-      --brand-soft: #ecfdf5;
-      --danger: #b91c1c;
-      --danger-soft: #fef2f2;
+      --bg: #f7f5f2;
+      --surface: #ffffff;
+      --tint: #faf9f7;
+
+      --ink: #1c1917;
+      --ink-2: #44403c;
+      --muted: #78716c;
+      --faint: #a8a29e;
+
+      --line: #eae6e0;
+      --line-2: #d9d3ca;
+
+      --brand: #0f766e;
+      --brand-strong: #0b5f58;
+      --brand-press: #094d48;
+      --brand-soft: #eaf4f2;
+      --brand-tint: #f2f8f6;
+      --ring: rgba(15, 118, 110, .28);
+
+      --err-ink: #b42318;
+      --err-bg: #fef3f2;
+      --err-line: #f8d8d2;
+      --ok-ink: #067647;
+      --ok-bg: #ecfdf3;
+      --ok-line: #b9ebcf;
+
+      --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+      --r-card: 16px;
+      --r-ctl: 12px;
+      --r-sm: 10px;
+
+      --shadow-card: 0 1px 2px rgba(28, 25, 23, .05), 0 16px 40px -24px rgba(28, 25, 23, .16);
+      --shadow-pop: 0 8px 24px -12px rgba(28, 25, 23, .18);
     }
-    * { box-sizing: border-box; margin: 0; }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { color-scheme: light; }
     body {
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      background: #f3f6f5; color: var(--ink);
-      min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-      padding: 28px 16px 40px;
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: env(safe-area-inset-top) 16px calc(20px + env(safe-area-inset-bottom));
+      font-size: 15px;
+      line-height: 1.5;
     }
-    .wrap { width: 100%; max-width: 430px; }
 
-    /* stepper */
-    .steps { display: flex; gap: 6px; margin-bottom: 14px; }
-    .step { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-    .step .dot {
-      width: 22px; height: 22px; border-radius: 50%; flex: none;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 700; background: #fff; border: 1.5px solid var(--line); color: var(--muted);
+    img { display: block; }
+    button { font: inherit; color: inherit; }
+    a { color: var(--brand); }
+    svg { display: block; }
+
+    :focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
+      border-radius: 4px;
     }
-    .step.on { color: var(--brand); font-weight: 600; }
-    .step.on .dot { background: var(--brand); border-color: var(--brand); color: #fff; }
-    .step.done .dot { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
-    .step .bar { flex: 1; height: 2px; background: var(--line); border-radius: 1px; }
-    .step:last-child .bar { display: none; }
 
+    /* ---------- masthead & footer ---------- */
+    .masthead { padding: 12px 0 10px; }
+    .brand {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: var(--ink);
+    }
+    .brand-mark { color: var(--brand); }
+    .brand-name {
+      font-size: 15px; font-weight: 700; letter-spacing: -.015em;
+      font-variant-ligatures: common-ligatures;
+    }
+
+    .stage {
+      width: 100%; max-width: 448px;
+      display: flex; flex-direction: column; flex: 1;
+    }
+    .stage.wide { max-width: 920px; }
+
+    .site-foot {
+      margin-top: auto;
+      padding: 10px 8px 2px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.55;
+    }
+    .site-foot .secured {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-weight: 600; color: var(--ink-2);
+    }
+    .site-foot .secured svg { color: var(--brand); }
+    .site-foot .foot-sep { margin: 0 4px; }
+
+    /* ---------- progress stepper ---------- */
+    .progress {
+      list-style: none;
+      display: flex; align-items: center; gap: 10px;
+      margin: 0 0 10px;
+    }
+    .p-step {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12.5px; font-weight: 550; color: var(--faint);
+      white-space: nowrap;
+    }
+    .p-dot {
+      width: 22px; height: 22px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 650;
+      background: var(--surface); border: 1.5px solid var(--line-2); color: var(--muted);
+      flex: none;
+    }
+    .p-step.is-current { color: var(--ink); }
+    .p-step.is-current .p-dot {
+      background: var(--brand); border-color: var(--brand); color: #fff;
+    }
+    .p-step.is-done { color: var(--muted); }
+    .p-step.is-done .p-dot {
+      background: var(--brand-soft); border-color: var(--brand); color: var(--brand);
+    }
+    .p-line { flex: 1; min-width: 14px; height: 1.5px; background: var(--line); border-radius: 1px; }
+    .p-line.is-done { background: var(--brand); }
+
+    /* ---------- card ---------- */
     .card {
-      background: #fff; border-radius: 18px; padding: 24px;
-      box-shadow: 0 8px 30px rgba(17, 24, 39, .08);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--r-card);
+      box-shadow: var(--shadow-card);
+      padding: 18px 16px;
+      animation: rise .4s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
     }
 
-    .merchant { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-    h1 { font-size: 17px; font-weight: 600; margin: 4px 0 16px; word-break: break-word; }
-
-    /* items + total */
-    .items { border-top: 1px solid var(--line); }
-    .item { display: flex; align-items: baseline; gap: 8px; padding: 10px 0; font-size: 14px; border-bottom: 1px solid var(--line); }
-    .item .name { flex: 1; }
-    .item .qty { color: var(--muted); font-size: 12px; }
-    .item .unit { color: var(--muted); font-size: 12px; }
-    .total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 0 4px; }
-    .total span:first-child { font-size: 13px; color: var(--muted); }
-    .amount { font-size: 32px; font-weight: 700; letter-spacing: -.01em; }
-
-    /* notices */
-    .error {
-      background: var(--danger-soft); border: 1px solid #fecaca; color: var(--danger);
-      border-radius: 12px; padding: 12px 14px; font-size: 14px; margin: 14px 0 4px; line-height: 1.45;
+    /* ---------- merchant identity + amount (single row) ---------- */
+    .card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 10px;
     }
-    .success { background: var(--brand-soft); border: 1px solid #a7f3d0; color: #065f46; border-radius: 12px; padding: 16px; margin-top: 16px; }
-    .success .big { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; }
-    .success .check {
-      width: 30px; height: 30px; border-radius: 50%; background: var(--brand); color: #fff;
-      display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none;
+    .merchant {
+      display: flex; align-items: center; gap: 11px;
+      flex: 1; min-width: 0;
     }
-    .success p { font-size: 13px; margin-top: 8px; color: #047857; }
-    .success .redirect { margin-top: 10px; }
-    .success .redirect a { color: var(--brand); font-weight: 600; }
-    .success .ref-chip { color: #047857; }
+    .merchant-avatar {
+      width: 40px; height: 40px; border-radius: 11px; flex: none;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--tint); border: 1px solid var(--line);
+      font-size: 16px; font-weight: 700; color: var(--ink-2);
+      text-transform: uppercase; letter-spacing: .02em;
+    }
+    .merchant-eyebrow {
+      font-size: 10.5px; font-weight: 650; letter-spacing: .09em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .merchant-name {
+      font-size: 15px; font-weight: 700; letter-spacing: -.015em; line-height: 1.25;
+      margin-top: 1px;
+      overflow-wrap: anywhere;
+    }
+    .merchant-ref {
+      font-size: 11.5px; color: var(--muted); margin-top: 1px;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+    .merchant-ref b { font-weight: 550; color: var(--ink-2); }
 
-    /* method buttons */
-    .choose { font-size: 13px; color: var(--muted); margin: 18px 0 10px; }
+    /* ---------- amount ---------- */
+    .amount-block {
+      background: var(--tint);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 7px 12px 9px;
+      text-align: right;
+      flex: none;
+    }
+    .amount-label {
+      font-size: 10px; font-weight: 650; letter-spacing: .09em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .amount {
+      margin-top: 1px;
+      font-size: 20px; font-weight: 750; letter-spacing: -.02em; line-height: 1.1;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums lining-nums;
+      display: flex; align-items: baseline; justify-content: flex-end; gap: 6px;
+    }
+    .amount-cur {
+      font-size: 11px; font-weight: 650; letter-spacing: .04em;
+      color: var(--muted);
+    }
+
+    /* ---------- order summary (collapsible) ---------- */
+    .order-details { margin-top: 8px; }
+    .order-details summary {
+      list-style: none;
+      display: flex; align-items: center; gap: 8px;
+      background: var(--tint); border: 1px solid var(--line); border-radius: 10px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12.5px; font-weight: 600; color: var(--ink-2);
+      transition: background .15s;
+    }
+    .order-details summary:hover { background: #f4f2ee; }
+    .order-details summary::-webkit-details-marker { display: none; }
+    .order-details[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+    .order-meta { margin-left: auto; font-weight: 550; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .order-chev { flex: none; color: var(--muted); transition: transform .18s; }
+    .order-details[open] .order-chev { transform: rotate(180deg); }
+    .items {
+      list-style: none;
+      background: #fff;
+      border: 1px solid var(--line); border-top: 0;
+      border-radius: 0 0 10px 10px;
+      padding: 2px 12px 6px;
+    }
+    .item {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 7px 0;
+      font-size: 13px;
+    }
+    .item + .item { border-top: 1px solid var(--line); }
+    .item-name { flex: 1; min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+    .item-meta { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .item-total { font-weight: 600; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+    /* ---------- notices ---------- */
+    .notice {
+      display: flex; gap: 11px; align-items: flex-start;
+      border-radius: 12px; padding: 13px 15px;
+      margin-top: 16px;
+      font-size: 13.5px; line-height: 1.5;
+      animation: rise .3s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    .notice svg { flex: none; margin-top: 1.5px; }
+    .notice-title { font-weight: 650; }
+    .notice-text { margin-top: 1px; }
+    .notice-error { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); }
+    .notice .notice-text { color: var(--err-ink); }
+    .notice-action {
+      margin-top: 9px;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #fff; border: 1px solid var(--err-line); color: var(--err-ink);
+      border-radius: 9px; padding: 7px 13px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    .notice-action:hover { background: #fff5f4; border-color: #f1b9b0; }
+
+    /* ---------- terminal state panels (expired / failed) ---------- */
+    .state-panel {
+      text-align: center;
+      padding: 22px 12px 8px;
+      animation: rise .3s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    .state-icon {
+      width: 46px; height: 46px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-bottom: 14px;
+    }
+    .state-panel h2 { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+    .state-panel p {
+      margin: 6px auto 0; max-width: 320px;
+      font-size: 13.5px; color: var(--muted); line-height: 1.55;
+    }
+    .state-expired .state-icon { background: var(--tint); border: 1px solid var(--line); color: var(--muted); }
+    .state-failed .state-icon { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); }
+
+    /* ---------- payment method selection ---------- */
+    .section-gap { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .choose-title { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .choose-sub { font-size: 13px; color: var(--muted); margin-top: 3px; }
+
     .methods {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .method-row {
+      width: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px;
+      background: var(--surface);
+      border: 1.5px solid var(--line);
+      border-radius: 14px;
+      padding: 13px 8px 11px;
+      cursor: pointer;
+      text-align: center;
+      min-height: 98px;
+      transition: border-color .16s, background .16s, box-shadow .16s, transform .1s;
+    }
+    .method-row:hover {
+      border-color: var(--brand);
+      background: var(--brand-tint);
+      box-shadow: var(--shadow-pop);
+      transform: translateY(-1px);
+    }
+    .method-row:active { transform: scale(.98); }
+    .method-logo {
+      width: 40px; height: 40px; flex: none;
+      border: 1px solid var(--line); border-radius: 10px;
+      background: #fff;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    .method-logo img { width: 27px; height: 27px; object-fit: contain; }
+    .method-badge {
+      font-size: 16px; font-weight: 750; color: var(--brand);
+      background: var(--brand-soft); border-radius: 9px;
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .method-name {
+      font-size: 12.5px; font-weight: 600; line-height: 1.3;
+      color: var(--ink-2);
+      overflow-wrap: anywhere;
+    }
+    .methods-empty {
+      margin-top: 14px; font-size: 13.5px; color: var(--muted);
+      background: var(--tint); border: 1px dashed var(--line-2);
+      border-radius: 12px; padding: 16px; text-align: center;
+    }
+
+    /* ---------- step-2 split layout ---------- */
+    .split {
+      display: grid;
+      gap: 16px;
+      margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line);
+      /* reading order on a phone: where to send -> how to pay -> verify */
+      grid-template-areas: "payto" "guide" "verify";
+    }
+    /* grid items must be allowed to shrink below the carousel's intrinsic
+       width, or the guide forces the whole card wider than the phone */
+    .area-payto, .area-guide, .area-verify { min-width: 0; }
+    .area-payto { grid-area: payto; }
+    .area-guide { grid-area: guide; }
+    .area-verify { grid-area: verify; }
+
+    /* ---------- pay-to (recipient) block ---------- */
+    .payto-panel {
+      background: var(--tint);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .payto-label {
+      font-size: 10.5px; font-weight: 650; letter-spacing: .09em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .payto-top {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+    }
+    .payto-method { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+    .payto-method-logo {
+      width: 26px; height: 26px; flex: none;
+      border: 1px solid var(--line); border-radius: 7px; background: #fff;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
+    }
+    .payto-method-logo img { width: 18px; height: 18px; object-fit: contain; }
+    .payto-method-name { font-size: 13px; font-weight: 650; }
+    .acct-row { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+    .acct {
+      flex: 1; min-width: 0;
+      font-family: var(--mono);
+      font-size: 17px; font-weight: 600; letter-spacing: .015em;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+    }
+    .copy {
+      flex: none;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface);
+      border: 1px solid var(--line-2); border-radius: var(--r-sm);
+      padding: 9px 13px; min-height: 40px;
+      font-size: 13px; font-weight: 600; color: var(--ink-2);
+      cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .copy:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-tint); }
+    .copy.is-copied { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+    .copy svg { flex: none; }
+    .payto-amount {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+      margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line-2);
+    }
+    .payto-amount-value {
+      font-size: 15px; font-weight: 750; letter-spacing: -.01em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---------- verify form ---------- */
+    .verify-title { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .verify-sub { font-size: 13.5px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
+    .field-label {
+      display: block;
+      font-size: 13px; font-weight: 600; color: var(--ink-2);
+      margin: 8px 0 5px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 84px;
+      border: 1.5px solid var(--line-2);
+      border-radius: var(--r-ctl);
+      background: var(--surface);
+      padding: 12px 14px;
+      font-family: var(--sans);
+      font-size: 16px; line-height: 1.5;
+      color: var(--ink);
+      resize: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    textarea::placeholder { color: var(--faint); }
+    textarea:hover { border-color: #c8c1b6; }
+    textarea:focus {
+      outline: none;
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3.5px var(--ring);
+    }
+    .field-hint {
+      display: flex; align-items: flex-start; gap: 7px;
+      font-size: 12.5px; color: var(--muted); line-height: 1.5;
+      margin-top: 6px;
+    }
+    .field-hint svg { flex: none; margin-top: 1.5px; color: var(--brand); }
+
+    .btn-primary {
+      width: 100%;
+      display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+      background: var(--brand); color: #fff;
+      border: 0; border-radius: var(--r-ctl);
+      padding: 14px 18px; min-height: 50px;
+      margin-top: 11px;
+      font-size: 15.5px; font-weight: 650; letter-spacing: .005em;
+      cursor: pointer;
+      transition: background .16s, transform .1s, box-shadow .16s;
+      box-shadow: 0 1px 2px rgba(9, 77, 72, .3), 0 8px 20px -10px rgba(15, 118, 110, .55);
+    }
+    .btn-primary:hover { background: var(--brand-strong); }
+    .btn-primary:active { background: var(--brand-press); transform: translateY(1px); }
+    .btn-primary:disabled {
+      opacity: .75; cursor: default; transform: none;
+      box-shadow: none;
+    }
+    .btn-spinner {
+      width: 16px; height: 16px; flex: none;
+      border: 2px solid rgba(255, 255, 255, .35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      display: none;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .is-loading .btn-spinner { display: inline-block; }
+
+    .change-method {
+      display: inline-flex; align-items: center; gap: 7px;
+      margin-top: 10px;
+      font-size: 13px; font-weight: 550; color: var(--muted);
+      text-decoration: none;
+      transition: color .15s;
+    }
+    .change-method:hover { color: var(--brand); }
+    .change-method svg { transition: transform .15s; }
+    .change-method:hover svg { transform: translateX(-2px); }
+
+    /* ---------- payment guide (collapsible on narrow screens) ---------- */
+    .guide-details > summary {
+      list-style: none;
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer;
+      padding: 2px 0 7px;
+    }
+    .guide-details > summary::-webkit-details-marker { display: none; }
+    .guide-logo {
+      width: 34px; height: 34px; flex: none;
+      border: 1px solid var(--line); border-radius: 9px; background: #fff;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
+    }
+    .guide-logo img { width: 23px; height: 23px; object-fit: contain; }
+    .guide-summary-text { display: flex; flex-direction: column; min-width: 0; }
+    .guide-title { font-size: 14.5px; font-weight: 700; letter-spacing: -.01em; }
+    .guide-sub { font-size: 12px; color: var(--muted); margin-top: 0; }
+    .guide-chev { margin-left: auto; flex: none; color: var(--muted); transition: transform .18s; }
+    .guide-details[open] > summary .guide-chev { transform: rotate(180deg); }
+
+    .guide-body { margin-top: 2px; }
+    .guide-track {
+      display: flex;
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      scrollbar-width: none;
+      border-radius: 14px;
+    }
+    .guide-track::-webkit-scrollbar { display: none; }
+    .slide {
+      flex: 0 0 100%;
+      scroll-snap-align: center;
+      min-width: 0;
+    }
+    .slide-frame {
+      height: min(50vh, 440px);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--tint);
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+      padding: 10px;
+    }
+    .slide-frame img {
+      max-width: 100%; max-height: 100%;
+      width: auto; height: auto;
+      border-radius: 8px;
+    }
+    .slide-num {
+      flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 22px; height: 22px; padding: 0 5px;
+      border-radius: 999px;
+      background: var(--brand-soft); color: var(--brand);
+      font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+      letter-spacing: .02em;
+    }
+    .guide-caption {
+      display: flex; align-items: center; justify-content: center; gap: 9px;
+      margin-top: 10px;
+      font-size: 13.5px; color: var(--ink-2); line-height: 1.45;
+      text-align: center;
+    }
+
+    .guide-nav {
+      display: flex; align-items: center; justify-content: center; gap: 14px;
       margin-top: 12px;
     }
-    .method-tile {
-      width: 100%; height: 64px; background: #fff; border: 1.5px solid var(--line);
-      border-radius: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center;
-      padding: 10px 14px; transition: border-color .15s, background .15s;
-    }
-    .method-tile:hover { border-color: var(--brand); background: var(--brand-soft); }
-    .method-tile img {
-      max-width: 100%; max-height: 100%; object-fit: contain; display: block;
-    }
-    .badge {
-      width: 40px; height: 40px; border-radius: 12px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 17px; font-weight: 800; color: #fff; background: var(--brand);
-    }
-    .prov-logo {
-      width: 20px; height: 20px; object-fit: contain; vertical-align: -4px; margin-right: 6px;
-    }
-
-    /* pay-to card */
-    .payto {
-      background: #f9fafb; border: 1px solid var(--line); border-radius: 14px;
-      padding: 14px 16px; margin-top: 16px;
-    }
-    .payto .label { font-size: 12px; color: var(--muted); }
-    .payto .pay-name {
-      display: flex; align-items: center; gap: 7px; margin: 5px 0 3px;
-      font-size: 15px; font-weight: 700; color: var(--ink);
-    }
-    .payto .pay-name img { width: 22px; height: 22px; object-fit: contain; }
-    .payto .row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
-    .payto b { font-size: 20px; letter-spacing: .03em; font-family: ui-monospace, "Cascadia Mono", monospace; }
-    .copy {
-      margin-left: auto; border: 1px solid var(--line); background: #fff; border-radius: 9px;
-      padding: 7px 12px; cursor: pointer; font-size: 13px; color: var(--ink); flex: none;
-    }
-    .copy:hover { background: #f3f4f6; }
-    .copy.ok { border-color: var(--brand); color: var(--brand); }
-
-    ol.howto { margin: 16px 0 4px 22px; color: #374151; font-size: 14px; line-height: 1.5; }
-    ol.howto li { margin-bottom: 7px; }
-    ol.howto b { font-weight: 600; }
-
-    /* app walkthrough slideshow */
-    .show-title { font-size: 13px; font-weight: 600; margin: 20px 0 8px; }
-    .show-hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
-    .carousel {
-      display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
-      gap: 0; border-radius: 16px; background: #0f172a;
-      scrollbar-width: none;
-    }
-    .carousel::-webkit-scrollbar { display: none; }
-    .slide { flex: 0 0 100%; scroll-snap-align: center; display: flex; flex-direction: column; }
-    .slide img { display: block; width: 100%; height: auto; border-radius: 16px; }
-    .slide figcaption {
-      background: linear-gradient(to top, rgba(15,23,42,.92), rgba(15,23,42,.55) 70%, transparent);
-      margin-top: -46px; padding: 30px 14px 10px; border-radius: 0 0 16px 16px;
-      color: #fff; font-size: 13px; text-align: center;
-    }
-    .slide figcaption b {
+    .guide-arrow {
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 1px solid var(--line-2); background: var(--surface);
+      color: var(--ink-2); cursor: pointer;
       display: inline-flex; align-items: center; justify-content: center;
-      width: 18px; height: 18px; border-radius: 50%; background: var(--brand);
-      color: #fff; font-size: 11px; margin-right: 6px;
+      transition: border-color .15s, color .15s, background .15s;
     }
-    .show-nav { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
-    .show-nav button.arrow {
-      width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--line);
-      background: #fff; font-size: 17px; color: var(--ink); cursor: pointer; line-height: 1;
+    .guide-arrow:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); background: var(--brand-tint); }
+    .guide-arrow:disabled { opacity: .35; cursor: default; }
+    .guide-dots { display: flex; gap: 4px; }
+    .guide-dots button {
+      width: 22px; height: 22px;
+      border: 0; background: transparent; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 50%;
     }
-    .show-nav button.arrow:hover { border-color: var(--brand); color: var(--brand); }
-    .show-nav button.arrow:disabled { opacity: .35; cursor: default; }
-    .dots { display: flex; gap: 6px; }
-    .dots span {
-      width: 7px; height: 7px; border-radius: 50%; background: #d1d5db;
-      transition: background .15s, width .15s; cursor: pointer;
+    .guide-dots button::before {
+      content: "";
+      width: 7px; height: 7px; border-radius: 999px;
+      background: var(--line-2);
+      transition: background .15s, width .18s;
     }
-    .dots span.on { background: var(--brand); width: 18px; border-radius: 4px; }
+    .guide-dots button.on::before { background: var(--brand); width: 18px; }
+    .guide-dots button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
-    /* steps table + hint variants: mobile keeps the swipe carousel with
-       captions on the slides; wide screens swap in the steps table */
-    .hint-auto { display: none; }
-    .steps-table { display: none; }
+    /* numbered guide (no screenshots configured) */
+    /* numbered guide (no screenshots configured) */
+    .guide-list { list-style: none; margin-top: 10px; }
+    .guide-list li {
+      display: flex; gap: 12px; align-items: flex-start;
+      padding: 11px 2px;
+      font-size: 14px; color: var(--ink-2); line-height: 1.5;
+    }
+    .guide-list li + li { border-top: 1px solid var(--line); }
+    .guide-list .slide-num { margin-top: .5px; }
 
-    /* --- parallel layout (wide screens): checkout beside the how-to-pay instructions --- */
+    /* ---------- success ---------- */
+    .success { text-align: center; padding: 18px 4px 6px; }
+    .success-check {
+      width: 64px; height: 64px; margin: 0 auto 18px;
+      border-radius: 50%;
+      background: var(--ok-bg);
+      border: 1px solid var(--ok-line);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--ok-ink);
+    }
+    .success-check svg circle {
+      stroke-dasharray: 158; stroke-dashoffset: 158;
+      animation: draw .55s cubic-bezier(.3, .6, .3, 1) forwards;
+    }
+    .success-check svg path {
+      stroke-dasharray: 34; stroke-dashoffset: 34;
+      animation: draw .35s .45s cubic-bezier(.3, .6, .3, 1) forwards;
+    }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+    .success h1 { font-size: 20px; font-weight: 750; letter-spacing: -.015em; }
+    .success-amount {
+      margin-top: 10px;
+      font-size: 30px; font-weight: 750; letter-spacing: -.025em;
+      font-variant-numeric: tabular-nums;
+      display: flex; align-items: baseline; justify-content: center; gap: 7px;
+    }
+    .success-amount .amount-cur { font-size: 14px; }
+    .success-paid { margin-top: 7px; font-size: 14px; color: var(--muted); }
+    .success-paid b { color: var(--ink-2); font-weight: 600; }
+    .success-verified {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-top: 16px; padding: 6px 12px;
+      border-radius: 999px;
+      background: var(--ok-bg); border: 1px solid var(--ok-line);
+      color: var(--ok-ink); font-size: 12.5px; font-weight: 650;
+    }
+    .success-ref {
+      margin: 14px auto 0; max-width: 340px;
+      font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+    .success-ref b { font-weight: 600; color: var(--ink-2); }
+    .success-redirect {
+      margin-top: 20px; padding-top: 16px;
+      border-top: 1px solid var(--line);
+      font-size: 13.5px; color: var(--muted);
+    }
+    .success-redirect a { font-weight: 600; text-decoration: none; }
+    .success-redirect a:hover { text-decoration: underline; }
+    .success-redirect b { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+    /* ============================================================
+       Wide screens: checkout beside the payment guide
+       ============================================================ */
     @media (min-width: 960px) {
-      .wrap.wide { max-width: 1000px; }
+      body { padding-top: 4px; }
+      .masthead { padding: 26px 0 22px; }
+      .card { padding: 28px 32px; }
 
-      .card.card-parallel {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
-        gap: 8px 48px;
-        align-items: start;
+      .split {
+        grid-template-areas: "payto guide" "verify guide";
+        grid-template-columns: minmax(0, 396px) minmax(0, 1fr);
+        grid-template-rows: auto 1fr;
+        gap: 24px 52px;
+        margin-top: 22px; padding-top: 22px;
       }
-      .card.card-parallel .checkout-side { grid-column: 1; }
-      .card.card-parallel .how-side { grid-column: 2; position: sticky; top: 24px; }
+      .area-payto { grid-column: 1; grid-row: 1; }
+      .area-verify { grid-column: 1; grid-row: 2; }
+      .area-guide {
+        grid-column: 2; grid-row: 1 / span 2;
+        border-left: 1px solid var(--line);
+        padding-left: 52px;
+        align-self: start;
+        position: sticky; top: 24px;
+      }
 
-      .hint-touch { display: none; }
-      .hint-auto { display: inline; }
-      .how-side .show-nav { display: none; }
-      .slide figcaption { display: none; }
+      /* the slideshow centers in the guide column; the caption below shows
+         the step on screen */
+      .guide-body { margin-top: 10px; }
+      /* the guide is always expanded here; the summary is a plain heading */
+      .guide-details > summary { cursor: default; padding-bottom: 8px; }
+      .guide-chev { display: none; }
 
-      /* cap the walkthrough height; the phone slide centers on the dark strip */
-      .how-side .carousel { height: 300px; }
-      .how-side .slide { justify-content: center; align-items: center; }
-      .how-side .slide img { width: auto; height: 100%; margin: 0 auto; border-radius: 0; }
-
-      .steps-table {
-        display: table; width: 100%; margin-top: 12px;
-        border-collapse: separate; border-spacing: 0;
+      .guide-carousel { margin-top: 0; }
+      .guide-track {
+        height: min(44vh, 396px);
+        max-width: 360px;
+        margin: 0 auto;
+        scroll-snap-type: none;
       }
-      .steps-table tr { cursor: pointer; }
-      .steps-table td {
-        padding: 10px 8px; border-bottom: 1px solid var(--line);
-        font-size: 13.5px; line-height: 1.4; color: #374151; vertical-align: middle;
-        transition: background .15s;
-      }
-      .steps-table tr:first-child td { border-top: 1px solid var(--line); }
-      .steps-table td.n { width: 30px; }
-      .steps-table .n span {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 22px; height: 22px; border-radius: 50%;
-        background: #fff; border: 1.5px solid var(--line); color: var(--muted);
-        font-size: 11px; font-weight: 700;
-      }
-      .steps-table tr.on td { color: var(--ink); font-weight: 600; background: var(--brand-soft); }
-      .steps-table tr.on .n span { background: var(--brand); border-color: var(--brand); color: #fff; }
+      .slide { display: flex; align-items: center; justify-content: center; height: 100%; }
+      .slide-frame { height: 100%; width: 100%; background: #fff; box-shadow: var(--shadow-pop); }
     }
 
-    label[for=txref] { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
-    input[type=text] {
-      width: 100%; border: 1.5px solid var(--line); border-radius: 12px;
-      padding: 13px 14px; font-size: 16px; font-family: ui-monospace, "Cascadia Mono", monospace;
+    /* ---------- reduced motion ---------- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-delay: 0ms !important;
+        transition-duration: .01ms !important;
+      }
+      .success-check svg circle, .success-check svg path { stroke-dashoffset: 0; }
     }
-    input[type=text]:focus { outline: none; border-color: var(--brand); }
-    .hint { font-size: 12px; color: var(--muted); margin: 6px 0 14px; }
-
-    button.pay {
-      width: 100%; background: var(--brand); color: #fff; border: 0; border-radius: 12px;
-      padding: 15px; font-size: 16px; font-weight: 700; cursor: pointer;
-    }
-    button.pay:hover { background: #065f46; }
-    button.pay:disabled { opacity: .65; cursor: default; }
-
-    a.change { display: block; text-align: center; font-size: 13px; color: var(--muted); margin-top: 14px; text-decoration: none; }
-    a.change:hover { color: var(--brand); text-decoration: underline; }
-
-    .ref-chip {
-      margin-top: 10px; font-size: 12px; color: var(--muted); word-break: break-all;
-      font-family: ui-monospace, "Cascadia Mono", monospace;
-    }
-    .foot { margin-top: 18px; font-size: 12px; color: #9ca3af; text-align: center; }
   </style>
 </head>
 <body>
-  <div class="wrap{% if show_instructions %} wide{% endif %}">
-    <div class="steps">
-      <div class="step {% if step == 1 %}on{% endif %} {% if step > 1 %}done{% endif %}"><span class="dot">{% if step > 1 %}&#10003;{% else %}1{% endif %}</span> Method<span class="bar"></span></div>
-      <div class="step {% if step == 2 %}on{% endif %} {% if step > 2 %}done{% endif %}"><span class="dot">{% if step > 2 %}&#10003;{% else %}2{% endif %}</span> Pay<span class="bar"></span></div>
-      <div class="step {% if step == 3 %}on{% endif %}"><span class="dot">3</span> Confirm</div>
+  <header class="masthead">
+    <div class="brand" aria-label="PayBridge">
+      <svg class="brand-mark" width="21" height="21" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M3.5 17.5v-4a8.5 8.5 0 0 1 17 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M2.5 17.5h19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M12 9.2v8.3M8.2 10.9v6.6M15.8 10.9v6.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".55"/>
+      </svg>
+      <span class="brand-name">PayBridge</span>
     </div>
+  </header>
 
-    <div class="card{% if show_instructions %} card-parallel{% endif %}">
-      <div class="checkout-side">
-      <div class="merchant">{{ merchant_name }}</div>
-      <h1>{{ reference }}</h1>
+  <main class="stage{% if show_instructions %} wide{% endif %}">
+    {% if show_succeeded || show_expired || show_failed %}{% else %}
+    <ol class="progress" aria-label="Checkout progress">
+      <li class="p-step {% if step == 1 %}is-current{% else %}is-done{% endif %}">
+        <span class="p-dot" aria-hidden="true">{% if step > 1 %}<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.2 6.4l2.5 2.5 5.1-5.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>{% else %}1{% endif %}</span>
+        <span{% if step == 1 %} aria-current="step"{% endif %}>Method</span>
+      </li>
+      <li class="p-line {% if step > 1 %}is-done{% endif %}" role="presentation"></li>
+      <li class="p-step {% if step == 2 %}is-current{% else %}{% if step > 2 %}is-done{% else %}{% endif %}{% endif %}">
+        <span class="p-dot" aria-hidden="true">{% if step > 2 %}<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.2 6.4l2.5 2.5 5.1-5.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>{% else %}2{% endif %}</span>
+        <span{% if step == 2 %} aria-current="step"{% endif %}>Pay</span>
+      </li>
+      <li class="p-line" role="presentation"></li>
+      <li class="p-step {% if step == 3 %}is-current{% endif %}">
+        <span class="p-dot" aria-hidden="true">3</span>
+        <span{% if step == 3 %} aria-current="step"{% endif %}>Confirm</span>
+      </li>
+    </ol>
+    {% endif %}
+
+    <section class="card" aria-label="Checkout">
+      {% if show_succeeded %}
+      <div class="success">
+        <div class="success-check" aria-hidden="true">
+          <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
+            <circle cx="17" cy="17" r="15.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" transform="rotate(-90 17 17)"/>
+            <path d="M10.5 17.6l4.4 4.4 8.6-9.8" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h1>Payment successful</h1>
+        <p class="success-amount" aria-label="Amount paid {{ amount_display }}">
+          <span>{{ amount_number }}</span><span class="amount-cur">{{ currency }}</span>
+        </p>
+        <p class="success-paid">Paid to <b>{{ merchant_name }}</b></p>
+        <p class="success-verified">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.5 7.3l3 3 6-6.6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Transaction verified
+        </p>
+        {% match paid_reference %}{% when Some with (r) %}
+        <p class="success-ref">Reference <b>{{ r }}</b></p>
+        {% when None %}{% endmatch %}
+        {% match redirect_url %}{% when Some with (url) %}
+        <p class="success-redirect">Taking you back in <b id="secs">5</b>s &middot; <a href="{{ url }}">Continue now</a></p>
+        {% when None %}{% endmatch %}
+      </div>
+      {% else %}
+
+      <div class="card-head">
+        <header class="merchant">
+          <span class="merchant-avatar" aria-hidden="true">{{ merchant_name.chars().next().unwrap_or('P') }}</span>
+          <div class="merchant-id">
+            <p class="merchant-eyebrow">Payment to</p>
+            <h1 class="merchant-name">{{ merchant_name }}</h1>
+            <p class="merchant-ref">Order <b>{{ reference }}</b></p>
+          </div>
+        </header>
+
+        <div class="amount-block">
+          <p class="amount-label" id="amountLabel">Amount due</p>
+          <p class="amount" aria-labelledby="amountLabel">
+            <span>{{ amount_number }}</span><span class="amount-cur">{{ currency }}</span>
+          </p>
+        </div>
+      </div>
 
       {% if has_items %}
-      <div class="items">
-        {% for item in items %}
-        <div class="item">
-          <span class="name">{{ item.name }}</span>
-          <span class="qty">&times;{{ item.quantity }}</span>
-          <span class="unit">@ {{ item.unit_price_display }}</span>
-          <span>{{ item.line_total_display }}</span>
+      <details class="order-details">
+        <summary aria-label="Order summary, {{ items.len() }} items">
+          <span>Order summary</span>
+          <span class="order-meta">{{ items.len() }} item{% if items.len() != 1 %}s{% endif %}</span>
+          <svg class="order-chev" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3.8 6.2L8 10.4l4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </summary>
+        <ul class="items">
+          {% for item in items %}
+          <li class="item">
+            <span class="item-name">{{ item.name }}</span>
+            {% if item.quantity > 1 %}<span class="item-meta">&times;{{ item.quantity }} &middot; {{ item.unit_price_display }}</span>{% endif %}
+            <span class="item-total">{{ item.line_total_display }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+
+      {% match error_message %}{% when Some with (msg) %}
+      <div class="notice notice-error" role="alert">
+        <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+          <circle cx="9" cy="9" r="7.2" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M9 5.6v3.9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <circle cx="9" cy="12.4" r=".95" fill="currentColor"/>
+        </svg>
+        <div>
+          <p class="notice-title">We couldn&rsquo;t verify this payment</p>
+          <p class="notice-text">{{ msg }}</p>
+          {% if show_instructions %}
+          <button type="button" class="notice-action" id="tryAgainBtn">Try again</button>
+          {% endif %}
         </div>
-        {% endfor %}
+      </div>
+      {% when None %}{% endmatch %}
+
+      {% if show_expired %}
+      <div class="state-panel state-expired" role="alert">
+        <span class="state-icon" aria-hidden="true">
+          <svg width="21" height="21" viewBox="0 0 22 22" fill="none">
+            <circle cx="11" cy="11" r="8.2" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M11 6.8V11l2.8 2.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <h2>Checkout expired</h2>
+        <p>This payment session has expired. Please start a new order with the merchant.</p>
       </div>
       {% endif %}
-      <div class="total">
-        <span>{% if has_items %}Total{% endif %}</span>
-        <span class="amount">{{ amount_display }}</span>
+
+      {% if show_failed %}
+      <div class="state-panel state-failed" role="alert">
+        <span class="state-icon" aria-hidden="true">
+          <svg width="21" height="21" viewBox="0 0 22 22" fill="none">
+            <circle cx="11" cy="11" r="8.2" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M8.2 8.2l5.6 5.6M13.8 8.2l-5.6 5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <h2>Payment unsuccessful</h2>
+        <p>This payment could not be completed. Please contact the merchant about your order.</p>
       </div>
-
-      {% match error_message %}{% when Some with (msg) %}<div class="error">{{ msg }}</div>{% when None %}{% endmatch %}
-
-      {% if show_expired %}<div class="error">This checkout link has expired. Please start a new order with the merchant.</div>{% endif %}
-      {% if show_failed %}<div class="error">This payment could not be completed. Please contact the merchant.</div>{% endif %}
+      {% endif %}
 
       {% if show_methods %}
-        <p class="choose">Choose a payment method</p>
+      <div class="section-gap">
+        <h2 class="choose-title">Choose payment method</h2>
+        <p class="choose-sub">Select how you&rsquo;d like to pay</p>
         <div class="methods">
         {% for m in methods %}
           <form method="post" action="/c/{{ checkout_id }}/method">
             <input type="hidden" name="csrf" value="{{ csrf }}" />
             <input type="hidden" name="method_id" value="{{ m.id }}" />
-            <button class="method-tile" type="submit" title="{{ m.display_name }}" aria-label="{{ m.display_name }}">
-              {% match m.logo_url %}{% when Some with (src) %}<img src="{{ src }}" alt="" />{% when None %}<span class="badge">{{ m.display_name.chars().next().unwrap_or('P') }}</span>{% endmatch %}
+            <button class="method-row" type="submit">
+              <span class="method-logo" aria-hidden="true">
+                {% match m.logo_url %}{% when Some with (src) %}<img src="{{ src }}" alt="" />{% when None %}<span class="method-badge">{{ m.display_name.chars().next().unwrap_or('P') }}</span>{% endmatch %}
+              </span>
+              <span class="method-name">{{ m.display_name }}</span>
             </button>
           </form>
         {% endfor %}
+        {% if methods.is_empty() %}
+        <p class="methods-empty">No payment methods are available right now. Please contact the merchant.</p>
+        {% endif %}
         </div>
+      </div>
       {% endif %}
-
-      {% if show_instructions %}{% match selected %}{% when Some with (s) %}
-      <div class="payto">
-        <div class="label">Send exactly {{ amount_display }} to</div>
-        <div class="pay-name">
-          {% match s.logo_url %}{% when Some with (src) %}<img src="{{ src }}" alt="" />{% when None %}{% endmatch %}
-          <span>{{ s.display_name }}</span>
-        </div>
-        <div class="row">
-          <b id="acct">{{ s.account_identifier }}</b>
-          <button class="copy" type="button" id="copyBtn" onclick="copyAcct()">Copy</button>
-        </div>
-      </div>
-      <form method="post" action="/c/{{ checkout_id }}/verify" class="verify" id="verifyForm">
-        <input type="hidden" name="csrf" value="{{ csrf }}" />
-        <label for="txref">Transaction reference</label>
-        <input type="text" id="txref" name="transaction_reference" placeholder="FT123456789 — or paste the payment SMS" maxlength="2000" autocomplete="off" autofocus required />
-        <p class="hint">Find it in your {{ s.display_name }} confirmation. It is not the receipt number.
-        Tip: paste the whole payment notification &mdash; we'll find the reference in it.</p>
-        <button class="pay" type="submit" id="verifyBtn">Verify Payment</button>
-      </form>
-      {% when None %}{% endmatch %}{% endif %}
-      </div>
 
       {% if show_instructions %}
-      <div class="how-side">
+      <div class="split">
         {% match selected %}{% when Some with (s) %}
-        {% if has_slides %}
-        <div class="instructions">
-          <p class="show-title">{% match s.logo_url %}{% when Some with (src) %}<img class="prov-logo" src="{{ src }}" alt="" />{% when None %}{% endmatch %}How to pay with {{ s.display_name }}</p>
-          <p class="show-hint">
-            <span class="hint-touch">Swipe through the steps &#8592; &#8594;</span>
-            <span class="hint-auto">Steps advance on their own &mdash; click one to jump</span>
-          </p>
-          <div class="carousel" id="carousel">
-            {% for slide in slides %}
-            <figure class="slide">
-              <img src="{{ slide.src }}" alt="{{ slide.caption }}" />
-              <figcaption><b>{{ loop.index }}</b>{{ slide.caption }}</figcaption>
-            </figure>
-            {% endfor %}
-          </div>
-          <div class="show-nav">
-            <button type="button" class="arrow" id="slidePrev" aria-label="Previous step">&#8249;</button>
-            <div class="dots" id="slideDots">
-              {% for slide in slides %}<span{% if loop.index == 1 %} class="on"{% endif %}></span>{% endfor %}
+
+        <section class="area-payto" aria-label="Payment details">
+          <div class="payto-panel">
+            <div class="payto-top">
+              <span class="payto-label">Send to</span>
+              <span class="payto-method">
+                <span class="payto-method-logo" aria-hidden="true">
+                  {% match s.logo_url %}{% when Some with (src) %}<img src="{{ src }}" alt="" />{% when None %}<span class="method-badge">{{ s.display_name.chars().next().unwrap_or('P') }}</span>{% endmatch %}
+                </span>
+                <span class="payto-method-name">{{ s.display_name }}</span>
+              </span>
             </div>
-            <button type="button" class="arrow" id="slideNext" aria-label="Next step">&#8250;</button>
+            <div class="acct-row">
+              <span class="acct" id="acct">{{ s.account_identifier }}</span>
+              <button class="copy" type="button" id="copyBtn">
+                <svg class="copy-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="5.2" y="5.2" width="8.3" height="8.3" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                  <path d="M10.8 3.2V3a1.8 1.8 0 0 0-1.8-1.8H4A1.8 1.8 0 0 0 2.2 3v5A1.8 1.8 0 0 0 4 9.8h.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <span class="copy-label">Copy</span>
+              </button>
+            </div>
+            <div class="payto-amount">
+              <span class="payto-label">Send exactly</span>
+              <span class="payto-amount-value">{{ amount_display }}</span>
+            </div>
           </div>
-          <table class="steps-table" id="stepsTable" aria-label="Payment steps">
-            <tbody>
-            {% for slide in slides %}
-              <tr data-step="{{ loop.index0 }}"{% if loop.first %} class="on"{% endif %}>
-                <td class="n"><span>{{ loop.index }}</span></td>
-                <td>{{ slide.caption }}</td>
-              </tr>
+        </section>
+
+        <section class="area-verify" aria-label="Verify your payment">
+          <form method="post" action="/c/{{ checkout_id }}/verify" id="verifyForm">
+            <input type="hidden" name="csrf" value="{{ csrf }}" />
+            <h2 class="verify-title">Verify your payment</h2>
+            <p class="verify-sub">After paying, paste your payment notification below.</p>
+            <label for="txref" class="field-label">Payment notification</label>
+            <textarea id="txref" name="transaction_reference" rows="3" maxlength="2000" required
+              placeholder="Paste your payment notification here&hellip;"
+              autocomplete="off" spellcheck="false" aria-describedby="txrefHint"></textarea>
+            <p class="field-hint" id="txrefHint">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 1.8l5.2 2.1v3.6c0 3.2-2.2 5.9-5.2 6.7-3-.8-5.2-3.5-5.2-6.7V3.9L8 1.8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M5.8 8l1.6 1.6 2.8-3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>We&rsquo;ll identify the transaction details automatically.</span>
+            </p>
+            <button class="btn-primary" type="submit" id="verifyBtn">
+              <span class="btn-label">Verify payment</span>
+              <span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </form>
+          {% if show_change_method %}
+          <a class="change-method" href="/c/{{ checkout_id }}?change=1">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.7 1.8v2.7H11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Use a different payment method
+          </a>
+          {% endif %}
+        </section>
+
+        <aside class="area-guide" aria-label="How to pay">
+          <details class="guide-details" id="guideDetails" open>
+            <summary>
+              <span class="guide-logo" aria-hidden="true">
+                {% match s.logo_url %}{% when Some with (src) %}<img src="{{ src }}" alt="" />{% when None %}<span class="method-badge">{{ s.display_name.chars().next().unwrap_or('P') }}</span>{% endmatch %}
+              </span>
+              <span class="guide-summary-text">
+                <h2 class="guide-title">How to pay</h2>
+                <span class="guide-sub">with {{ s.display_name }}</span>
+              </span>
+              <svg class="guide-chev" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3.8 6.2L8 10.4l4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </summary>
+            <div class="guide-summary-body">
+
+          {% if has_slides %}
+          <div class="guide-body">
+            <div class="guide-carousel">
+              <div class="guide-track" id="carousel" tabindex="0" role="group" aria-roledescription="carousel" aria-label="Payment steps walkthrough">
+                {% for slide in slides %}
+                <figure class="slide" aria-label="Step {{ loop.index }}: {{ slide.caption }}">
+                  <div class="slide-frame">
+                    <img src="{{ slide.src }}" alt="{{ slide.caption }}" />
+                  </div>
+                </figure>
+                {% endfor %}
+              </div>
+              <div class="guide-nav">
+                <button type="button" class="guide-arrow" id="slidePrev" aria-label="Previous step">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M11.2 3.8L6 9l5.2 5.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <div class="guide-dots" id="slideDots" role="presentation">
+                  {% for slide in slides %}<button type="button" aria-label="Go to step {{ loop.index }}"{% if loop.first %} class="on"{% endif %}></button>{% endfor %}
+                </div>
+                <button type="button" class="guide-arrow" id="slideNext" aria-label="Next step">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M6.8 3.8L12 9l-5.2 5.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+              <p class="guide-caption" aria-live="polite">
+                <span class="slide-num" id="guideCaptionNum" aria-hidden="true">{% for slide in slides %}{% if loop.first %}0{{ loop.index }}{% endif %}{% endfor %}</span>
+                <span id="guideCaptionText">{% for slide in slides %}{% if loop.first %}{{ slide.caption }}{% endif %}{% endfor %}</span>
+              </p>
+            </div>
+          </div>
+          {% else %}
+          <ol class="guide-list" aria-label="Payment steps">
+            {% for line in s.instruction_lines %}
+            <li>
+              <span class="slide-num" aria-hidden="true">{% if loop.index < 10 %}0{% endif %}{{ loop.index }}</span>
+              <span>{{ line }}</span>
+            </li>
             {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-        <ol class="howto">
-          {% for line in s.instruction_lines %}<li>{{ line }}</li>{% endfor %}
-        </ol>
-        {% endif %}
-        {% if show_change_method %}<a class="change" href="/c/{{ checkout_id }}?change=1">&#8592; Use a different payment method</a>{% endif %}
+          </ol>
+          {% endif %}
+            </div>
+          </details>
+        </aside>
+
         {% when None %}{% endmatch %}
       </div>
       {% endif %}
-
-      {% if show_succeeded %}
-      <div class="success">
-        <div class="big"><span class="check">&#10003;</span> Payment successful</div>
-        <p>{{ amount_display }} paid to {{ merchant_name }}. Thank you!</p>
-        {% match paid_reference %}{% when Some with (r) %}<p class="ref-chip">Transaction reference: {{ r }}</p>{% when None %}{% endmatch %}
-        {% match redirect_url %}{% when Some with (url) %}
-        <p class="redirect">Taking you back in <b id="secs">5</b>s &middot; <a href="{{ url }}">Continue now</a></p>
-        {% when None %}{% endmatch %}
-      </div>
       {% endif %}
-    </div>
+    </section>
 
-    <p class="foot">Payments are verified against your wallet's transaction record &mdash; powered by PayBridge</p>
-  </div>
+    <footer class="site-foot">
+      <p>
+        <span class="secured">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="2.6" y="6" width="8.8" height="6" rx="1.6" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M4.6 6V4.4a2.4 2.4 0 0 1 4.8 0V6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <b>Secured by PayBridge</b>
+        </span>
+        <span class="foot-sep" aria-hidden="true">&middot;</span>
+        Payments are verified against your wallet&rsquo;s transaction record
+      </p>
+    </footer>
+  </main>
 
   <script>
-    function copyAcct() {
-      var btn = document.getElementById('copyBtn');
-      var text = document.getElementById('acct').textContent.trim();
-      var done = function () {
-        btn.textContent = 'Copied \u2713';
-        btn.classList.add('ok');
-        setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1600);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done);
-      } else {
-        var ta = document.createElement('textarea');
-        ta.value = text; document.body.appendChild(ta); ta.select();
-        try { document.execCommand('copy'); done(); } catch (e) {}
-        document.body.removeChild(ta);
-      }
-    }
-    // Lock the verify button while the form submits so the customer cannot
-    // double-post past the 5 s cooldown.
-    var form = document.getElementById('verifyForm');
-    if (form) {
-      form.addEventListener('submit', function () {
-        var btn = document.getElementById('verifyBtn');
-        btn.disabled = true;
-        btn.textContent = 'Verifying\u2026';
-      });
-    }
-    // Success screen: count down the 5 s pause on this page; the meta
-    // refresh in <head> then sends the customer to the merchant's returnUrl.
-    var secs = document.getElementById('secs');
-    if (secs) {
-      var left = 5;
-      var tick = window.setInterval(function () {
-        left -= 1;
-        if (left <= 0) { window.clearInterval(tick); return; }
-        secs.textContent = String(left);
-      }, 1000);
-    }
-    // App-walkthrough slideshow: native scroll-snap handles touch swipes;
-    // arrows and dots scroll to a slide index, and scrolling updates the dots.
-    // On wide screens the same carousel lives inside a laptop mockup, a steps
-    // table beside it mirrors the active step, and the show auto-advances.
-    var carousel = document.getElementById('carousel');
-    if (carousel) {
-      var slides = carousel.querySelectorAll('.slide');
-      var dots = document.getElementById('slideDots').children;
-      var prev = document.getElementById('slidePrev');
-      var next = document.getElementById('slideNext');
-      var table = document.getElementById('stepsTable');
-      var rows = table ? table.querySelectorAll('tr') : [];
-      var current = 0;
-
-      function show(i) {
-        i = Math.max(0, Math.min(slides.length - 1, i));
-        carousel.scrollTo({ left: i * carousel.clientWidth, behavior: 'smooth' });
-      }
-      function syncDots() {
-        current = Math.round(carousel.scrollLeft / Math.max(1, carousel.clientWidth));
-        for (var i = 0; i < dots.length; i++) dots[i].classList.toggle('on', i === current);
-        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('on', j === current);
-        prev.disabled = current === 0;
-        next.disabled = current === slides.length - 1;
-      }
-      prev.addEventListener('click', function () { show(current - 1); restartAuto(); });
-      next.addEventListener('click', function () { show(current + 1); restartAuto(); });
-      for (var i = 0; i < dots.length; i++) {
-        (function (i) { dots[i].addEventListener('click', function () { show(i); restartAuto(); }); })(i);
-      }
-      for (var k = 0; k < rows.length; k++) {
-        (function (k) { rows[k].addEventListener('click', function () { show(k); restartAuto(); }); })(k);
-      }
-      carousel.addEventListener('scroll', function () {
-        window.clearTimeout(carousel._t);
-        carousel._t = window.setTimeout(syncDots, 80);
-      });
-      syncDots();
-
-      // Auto-advance: loops through the steps, pausing while hovered or the
-      // tab is hidden; manual navigation restarts the clock; reduced-motion
-      // users never see it move on its own.
-      var AUTO_MS = 3500;
+    (function () {
       var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      var autoTimer = null;
-      var hovering = false;
-      carousel.addEventListener('mouseenter', function () { hovering = true; });
-      carousel.addEventListener('mouseleave', function () { hovering = false; });
-      function restartAuto() {
-        if (autoTimer) window.clearInterval(autoTimer);
-        autoTimer = null;
-        if (reduceMotion || slides.length < 2) return;
-        autoTimer = window.setInterval(function () {
-          if (document.hidden || hovering) return;
-          show((current + 1) % slides.length);
-        }, AUTO_MS);
+
+      /* ---- the payment guide is a collapsed section on narrow screens and
+         permanently open beside the checkout on wide ones ---- */
+      var guideDetails = document.getElementById('guideDetails');
+      if (guideDetails) {
+        var wideMq = window.matchMedia('(min-width: 960px)');
+        var syncGuide = function () { guideDetails.open = wideMq.matches; };
+        if (wideMq.addEventListener) wideMq.addEventListener('change', syncGuide);
+        else if (wideMq.addListener) wideMq.addListener(syncGuide);
+        syncGuide();
       }
-      restartAuto();
-    }
+
+      /* ---- copy account number ---- */
+      var copyBtn = document.getElementById('copyBtn');
+      if (copyBtn) {
+        var fallbackCopy = function (text) {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (e) {}
+          document.body.removeChild(ta);
+          return ok;
+        };
+        copyBtn.addEventListener('click', function () {
+          var text = document.getElementById('acct').textContent.trim();
+          var done = function () {
+            copyBtn.classList.add('is-copied');
+            copyBtn.setAttribute('aria-label', 'Copied to clipboard');
+            var label = copyBtn.querySelector('.copy-label');
+            if (label) label.textContent = 'Copied';
+            window.setTimeout(function () {
+              copyBtn.classList.remove('is-copied');
+              copyBtn.removeAttribute('aria-label');
+              if (label) label.textContent = 'Copy';
+            }, 1600);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(function () {
+              if (fallbackCopy(text)) done();
+            });
+          } else if (fallbackCopy(text)) {
+            done();
+          }
+        });
+      }
+
+      /* ---- lock the verify button while the form submits so the customer
+         cannot double-post past the 5 s cooldown ---- */
+      var form = document.getElementById('verifyForm');
+      if (form) {
+        form.addEventListener('submit', function () {
+          var btn = document.getElementById('verifyBtn');
+          btn.disabled = true;
+          btn.classList.add('is-loading');
+          var label = btn.querySelector('.btn-label');
+          if (label) label.textContent = 'Checking your payment\u2026';
+        });
+        /* On wide screens the textarea is the primary action; focus it so a
+           paste lands immediately. Mobile keyboards stay closed. */
+        if (window.matchMedia('(min-width: 960px)').matches) {
+          var tx = document.getElementById('txref');
+          if (tx) tx.focus();
+        }
+      }
+
+      var tryAgain = document.getElementById('tryAgainBtn');
+      if (tryAgain) {
+        tryAgain.addEventListener('click', function () {
+          var tx = document.getElementById('txref');
+          if (tx) { tx.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' }); tx.focus(); }
+        });
+      }
+
+      /* ---- success: count down the 5 s pause; the meta refresh in <head>
+         then sends the customer to the merchant's returnUrl ---- */
+      var secs = document.getElementById('secs');
+      if (secs) {
+        var left = 5;
+        var tick = window.setInterval(function () {
+          left -= 1;
+          if (left <= 0) { window.clearInterval(tick); return; }
+          secs.textContent = String(left);
+        }, 1000);
+      }
+
+      /* ---- payment guide walkthrough: native scroll-snap handles touch
+         swipes; arrows, dots and the step list scroll to a slide, and
+         scrolling updates all of them. Auto-advance pauses while hovered or
+         the tab is hidden; reduced-motion users never see it move. ---- */
+      var carousel = document.getElementById('carousel');
+      if (carousel) {
+        var slides = carousel.querySelectorAll('.slide');
+        var dots = document.getElementById('slideDots').children;
+        var prev = document.getElementById('slidePrev');
+        var next = document.getElementById('slideNext');
+        var capNum = document.getElementById('guideCaptionNum');
+        var capText = document.getElementById('guideCaptionText');
+        var current = 0;
+
+        function show(i) {
+          i = Math.max(0, Math.min(slides.length - 1, i));
+          carousel.scrollTo({ left: i * carousel.clientWidth, behavior: reduceMotion ? 'auto' : 'smooth' });
+        }
+        function sync() {
+          current = Math.round(carousel.scrollLeft / Math.max(1, carousel.clientWidth));
+          for (var i = 0; i < dots.length; i++) {
+            dots[i].classList.toggle('on', i === current);
+            dots[i].setAttribute('aria-current', i === current ? 'true' : 'false');
+          }
+          if (capNum) capNum.textContent = current + 1 < 10 ? '0' + (current + 1) : String(current + 1);
+          if (capText) {
+            var img = slides[current].querySelector('img');
+            capText.textContent = img ? img.alt : '';
+          }
+          prev.disabled = current === 0;
+          next.disabled = current === slides.length - 1;
+        }
+        prev.addEventListener('click', function () { show(current - 1); restartAuto(); });
+        next.addEventListener('click', function () { show(current + 1); restartAuto(); });
+        for (var i = 0; i < dots.length; i++) {
+          (function (i) { dots[i].addEventListener('click', function () { show(i); restartAuto(); }); })(i);
+        }
+        carousel.addEventListener('scroll', function () {
+          window.clearTimeout(carousel._t);
+          carousel._t = window.setTimeout(sync, 80);
+        });
+        carousel.addEventListener('keydown', function (e) {
+          if (e.key === 'ArrowRight') { show(current + 1); restartAuto(); }
+          if (e.key === 'ArrowLeft') { show(current - 1); restartAuto(); }
+        });
+        sync();
+
+        var AUTO_MS = 3500;
+        var autoTimer = null;
+        var hovering = false;
+        carousel.addEventListener('mouseenter', function () { hovering = true; });
+        carousel.addEventListener('mouseleave', function () { hovering = false; });
+        function restartAuto() {
+          if (autoTimer) window.clearInterval(autoTimer);
+          autoTimer = null;
+          if (reduceMotion || slides.length < 2) return;
+          autoTimer = window.setInterval(function () {
+            if (document.hidden || hovering) return;
+            show((current + 1) % slides.length);
+          }, AUTO_MS);
+        }
+        restartAuto();
+      }
+    })();
   </script>
 </body>
 </html>
