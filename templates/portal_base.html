@@ -130,6 +130,19 @@
     .card form select, .card form input {
       border: 1.5px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: #fff;
     }
+    .linkgen {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px 12px; align-items: end; margin-top: 10px;
+    }
+    .linkgen label { display: flex; flex-direction: column; gap: 4px; }
+    .linkgen label input, .linkgen label select { width: 100%; }
+    .linkgen button[type=submit] { justify-self: end; padding: 8px 18px; }
+    .link-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    .link-line code {
+      flex: 1 1 auto; padding: 8px 10px; background: #fff; border: 1px solid #a7f3d0; border-radius: 8px;
+      font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 13px; color: var(--ink);
+      word-break: break-all; user-select: all;
+    }
     @media (max-width: 860px) {
       :root { --sidebar-w: 60px; }
       .sidebar .logo { font-size: 11px; padding: 14px 6px; }

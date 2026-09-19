@@ -340,6 +340,7 @@ pub fn portal_router(state: AppState) -> Router<AppState> {
         .route("/", get(portal_home))
         .route("/checkouts", get(portal_checkouts))
         .route("/checkouts/{checkout_id}", get(portal_checkout_detail))
+        .route("/payment-links", post(portal_payment_link_create))
         .route("/webhooks", get(portal_webhooks))
         .route("/webhooks/endpoints", post(portal_webhook_create))
         .route("/webhooks/endpoints/{endpoint_id}/status", post(portal_webhook_status))
@@ -2706,6 +2707,16 @@ pub struct PortalRecentRow {
     pub created_at: String,
 }
 
+/// A freshly generated payment link, shown on the dashboard after the
+/// generator redirects back (`/portal?created={checkout_id}`).
+pub struct CreatedLink {
+    pub checkout_id: String,
+    pub url: String,
+    pub reference: String,
+    pub amount_display: String,
+    pub expires_at: String,
+}
+
 #[derive(Template)]
 #[template(path = "portal_home.html")]
 pub struct PortalHomePage {
@@ -2722,6 +2733,16 @@ pub struct PortalHomePage {
     pub pending: i64,
     pub recent: Vec<PortalRecentRow>,
     pub methods: Vec<MerchantMethodRow>,
+    pub created_link: Option<CreatedLink>,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PortalHomeQuery {
+    /// `?created={checkout_id}`: reveal the just-generated payment link.
+    pub created: Option<String>,
+    /// `?error={message}`: validation failure from the generator form.
+    pub error: Option<String>,
 }
 
 #[derive(Template)]
@@ -2760,6 +2781,8 @@ pub struct PortalCheckoutPage {
     pub attempts: Vec<AttemptRow>,
     pub events: Vec<EventRow>,
     pub timeline: Vec<TimelineRow>,
+    /// Shareable hosted-checkout URL for this checkout.
+    pub payment_url: String,
 }
 
 pub struct PortalDeliveryListRow {
@@ -2859,10 +2882,38 @@ pub struct PortalCreditsPage {
 pub async fn portal_home(
     State(state): State<AppState>,
     Extension(sess): Extension<SessionInfo>,
+    Query(params): Query<PortalHomeQuery>,
 ) -> Response {
     let Some((merchant_id, merchant_name, onboarding, credits)) = portal_merchant(&state, &sess).await else {
         return not_found();
     };
+
+    // The just-generated payment link, ownership-scoped: another merchant's
+    // checkout id in the query string renders no banner.
+    let created_link = match params.created.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => db::query_as::<(String, i64, String, String)>(
+            "SELECT reference, amount_minor, currency, expires_at FROM checkouts \
+             WHERE id = ? AND merchant_id = ?",
+        )
+        .bind(id)
+        .bind(&merchant_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(reference, amount_minor, currency, expires_at)| CreatedLink {
+            checkout_id: id.to_string(),
+            url: format!("{}/c/{}", state.config.base_url, id),
+            amount_display: format!("{} {currency}", format_minor(amount_minor)),
+            reference,
+            expires_at,
+        }),
+        None => None,
+    };
+    let error = params
+        .error
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let by_status: Vec<(String, i64, i64)> = db::query_as(
@@ -2964,6 +3015,8 @@ pub async fn portal_home(
             pending,
             recent,
             methods,
+            created_link,
+            error,
         },
     )
 }
@@ -3233,6 +3286,7 @@ pub async fn portal_checkout_detail(
         .join(" \u{b7} ");
 
     let timeline = checkout_timeline(&state.pool, &checkout_id, &created_at, &paid_at).await;
+    let payment_url = format!("{}/c/{}", state.config.base_url, checkout_id);
     page(
         StatusCode::OK,
         PortalCheckoutPage {
@@ -3256,8 +3310,149 @@ pub async fn portal_checkout_detail(
             attempts,
             events,
             timeline,
+            payment_url,
         },
     )
+}
+
+// --- portal: payment link generator -------------------------------------------
+
+#[derive(Deserialize)]
+pub struct PaymentLinkForm {
+    pub csrf: String,
+    /// Decimal ETB amount, e.g. "500" or "500.50".
+    pub amount: String,
+    /// Merchant-side reference; auto-generated when left blank.
+    pub reference: Option<String>,
+    pub customer_name: Option<String>,
+    pub customer_email: Option<String>,
+    pub return_url: Option<String>,
+    /// "1h", "24h" (default) or "7d".
+    pub expires_in: Option<String>,
+}
+
+/// Back to the dashboard with the error in the query string (refresh clears it).
+fn redirect_portal_error(message: &str) -> Response {
+    let q = percent_encoding::utf8_percent_encode(message, percent_encoding::NON_ALPHANUMERIC);
+    Redirect::to(&format!("/portal?error={q}")).into_response()
+}
+
+/// No-code checkout creation: the merchant generates a shareable hosted
+/// payment link (`{base_url}/c/{checkout_id}`) straight from the dashboard.
+/// Mirrors the API's gates (active merchant, prepaid credit) and validation.
+pub async fn portal_payment_link_create(
+    State(state): State<AppState>,
+    Extension(sess): Extension<SessionInfo>,
+    headers: HeaderMap,
+    Form(form): Form<PaymentLinkForm>,
+) -> Response {
+    if !csrf_ok(&sess, &form.csrf) {
+        return bad_request("expired session; go back and retry");
+    }
+    let Some(merchant_id) = sess.user.merchant_id.clone() else {
+        return not_found();
+    };
+    let Some((merchant_status, credits)) = db::query_as::<(String, i64)>(
+        "SELECT status, credit_balance FROM merchants WHERE id = ?",
+    )
+    .bind(&merchant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    else {
+        return not_found();
+    };
+    if merchant_status != "active" {
+        return redirect_portal_error("Your merchant account is not active — contact support.");
+    }
+    // Same prepaid gate as the API: never collect a payment that cannot be verified.
+    if credits < 1 {
+        return redirect_portal_error(
+            "Your verification credit is exhausted. Buy more credit to continue.",
+        );
+    }
+
+    let amount_minor = match crate::money::decimal_to_minor(form.amount.trim()) {
+        Ok(minor) if minor > 0 => minor,
+        Ok(_) => return redirect_portal_error("Amount must be greater than zero."),
+        Err(_) => {
+            return redirect_portal_error(
+                "Enter a valid amount with at most 2 decimal places, e.g. 500 or 500.50.",
+            )
+        }
+    };
+
+    let reference = match form.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => r.to_string(),
+        None => new_id("ref"),
+    };
+    let customer_name = form
+        .customer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let customer_email = form
+        .customer_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let return_url = match form.return_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => match url::Url::parse(url) {
+            Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
+                Some(url.to_string())
+            }
+            _ => return redirect_portal_error("Return URL must be an absolute http(s) URL."),
+        },
+        None => None,
+    };
+
+    let ttl_secs = match form.expires_in.as_deref() {
+        Some("1h") => 3600,
+        Some("7d") => 7 * 86_400,
+        _ => 86_400,
+    }
+    .min(state.config.checkout_ttl_max.as_secs() as i64);
+    let expires_at = crate::ids::to_iso(chrono::Utc::now() + chrono::Duration::seconds(ttl_secs));
+
+    let checkout_id = new_id("chk");
+    if let Err(e) = db::query(
+        "INSERT INTO checkouts \
+         (id, merchant_id, reference, amount_minor, currency, status, customer_name, customer_email, return_url, selected_method_id, expires_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 'ETB', 'created', ?, ?, ?, NULL, ?, ?, ?)",
+    )
+    .bind(&checkout_id)
+    .bind(&merchant_id)
+    .bind(&reference)
+    .bind(amount_minor)
+    .bind(&customer_name)
+    .bind(&customer_email)
+    .bind(&return_url)
+    .bind(&expires_at)
+    .bind(now_iso())
+    .bind(now_iso())
+    .execute(&state.pool)
+    .await
+    {
+        return db_error(e);
+    }
+
+    audit(
+        &state.pool,
+        &sess.user.email,
+        client_ip(&headers).as_deref(),
+        "payment_link.created",
+        "checkout",
+        &checkout_id,
+        Some(format!(
+            "{{\"reference\":\"{reference}\",\"amount_minor\":{amount_minor},\"self\":true}}"
+        )),
+    )
+    .await;
+
+    Redirect::to(&format!("/portal?created={checkout_id}")).into_response()
 }
 
 // --- portal: webhooks ---------------------------------------------------------

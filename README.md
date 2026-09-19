@@ -96,7 +96,9 @@ their sessions.
 merchant plus its owner user (role `merchant`), who signs into a portal at
 [`/portal`](http://localhost:4000/portal) — the full ops toolkit scoped
 strictly to their own merchant: dashboard (today's payments/volume/credits),
-checkout search + detail (verify attempts, webhook events), their webhook
+checkout search + detail (verify attempts, webhook events), **payment link
+generator** (create a shareable hosted-checkout URL straight from the
+dashboard — same gates and validation as the API), their webhook
 deliveries with retry, **payment-method self-service** (add a provider +
 receiving account; the customer steps come from central `provider_instructions`
 config that only admins edit, per method), self-serve API keys

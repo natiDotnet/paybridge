@@ -12,6 +12,26 @@
 credit</a> to activate it &mdash; your API key works as soon as you have credit.</div>
 {% endif %}
 
+{% match error %}
+{% when Some with (msg) %}<div class="banner warn">{{ msg }}</div>
+{% when None %}{% endmatch %}
+
+{% match created_link %}
+{% when Some with (l) %}
+<div class="banner ok">
+  Payment link created for <b>{{ l.reference }}</b> &middot; {{ l.amount_display }} ETB.
+  Share this URL with your customer &mdash; it opens the hosted checkout page:
+  <div class="link-line">
+    <code>{{ l.url }}</code>
+    <button type="button" class="act"
+      onclick="navigator.clipboard.writeText('{{ l.url }}').then(() => { this.textContent = 'Copied!'; setTimeout(() => { this.textContent = 'Copy link'; }, 1500); })">Copy link</button>
+    <a href="{{ l.url }}" target="_blank" rel="noopener">Open</a>
+  </div>
+  Expires {{ l.expires_at }}. The customer pays by Telebirr, CBE Birr, or bank transfer and you
+  follow it on the <a href="/portal/checkouts">Checkouts</a> page.
+</div>
+{% when None %}{% endmatch %}
+
 <div class="stats">
   <div class="stat"><span class="label">Today's payments</span><b>{{ today_total }}</b></div>
   <div class="stat"><span class="label">Successful today</span><b>{{ today_succeeded }}</b></div>
@@ -22,9 +42,42 @@ credit</a> to activate it &mdash; your API key works as soon as you have credit.
 </div>
 
 <div class="card">
+  <h2>Create payment link</h2>
+  <p class="empty">Generate a shareable URL that opens a hosted checkout &mdash; no API integration
+  needed. One verification credit is consumed when the payment is verified.</p>
+  <form class="linkgen" method="post" action="/portal/payment-links">
+    <input type="hidden" name="csrf" value="{{ csrf }}" />
+    <label>Amount (ETB)
+      <input type="text" inputmode="decimal" name="amount" required placeholder="500.00" />
+    </label>
+    <label>Reference
+      <input type="text" name="reference" placeholder="ORDER-1 (auto if blank)" />
+    </label>
+    <label>Expires in
+      <select name="expires_in">
+        <option value="1h">1 hour</option>
+        <option value="24h" selected>24 hours</option>
+        <option value="7d">7 days</option>
+      </select>
+    </label>
+    <label>Customer name
+      <input type="text" name="customer_name" placeholder="Optional" />
+    </label>
+    <label>Customer email
+      <input type="text" name="customer_email" placeholder="Optional" />
+    </label>
+    <label>Return URL
+      <input type="text" name="return_url" placeholder="https://yoursite.com/thanks (optional)" />
+    </label>
+    <button type="submit" class="act primary">Generate payment link</button>
+  </form>
+</div>
+
+<div class="card">
   <h2>Recent payments</h2>
   {% if recent.is_empty() %}
-  <p class="empty">No checkouts yet. Create one from your integration — see the <a href="/docs">API reference</a>.</p>
+  <p class="empty">No checkouts yet. Generate a payment link above, or create one from your
+  integration &mdash; see the <a href="/docs">API reference</a>.</p>
   {% else %}
   <table>
     <tr><th>Reference</th><th class="num">Amount</th><th>Status</th><th>Created</th></tr>

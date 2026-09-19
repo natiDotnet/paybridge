@@ -9,6 +9,7 @@
 <div class="card">
   <div class="dl">
     <dt>Checkout ID</dt><dd class="id">{{ checkout_id }}</dd>
+    <dt>Payment link</dt><dd class="id">{{ payment_url }}</dd>
     <dt>Amount</dt><dd><b>{{ amount_display }} {{ currency }}</b></dd>
     {% if !customer.is_empty() %}<dt>Customer</dt><dd>{{ customer }}</dd>{% endif %}
     <dt>Payment method</dt><dd>{% match method %}{% when Some with (m) %}{{ m.1 }} ({{ m.0 }}){% when None %}&mdash;{% endmatch %}</dd>

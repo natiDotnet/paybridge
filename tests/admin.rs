@@ -1358,3 +1358,204 @@ async fn portal_scoping() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn payment_link_generator() {
+    let (app, pool, _tmp) = setup().await;
+    let (admin_cookie, admin_csrf) = login(&app).await;
+
+    // A merchant-role user for the seeded merchant (active, 1000 credits).
+    let (status, body, _) = call(
+        &app,
+        post(
+            "/admin/users",
+            &format!(
+                "csrf={admin_csrf}&email=links@acme.test&name=Acme Owner&role=merchant&password=merchpass1&merchant_id={MERCHANT}"
+            ),
+            "application/x-www-form-urlencoded",
+            Some(&admin_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "create merchant user: {body}");
+    let owner_cookie = login_with(&app, "links@acme.test", "merchpass1").await;
+    let owner_csrf =
+        owner_cookie.split_once('=').unwrap().1.split_once('.').unwrap().1.to_string();
+
+    // --- 1. the dashboard renders the generator form ---------------------------
+    let (status, body, _) = call(&app, get("/portal", Some(&owner_cookie))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Create payment link"), "generator form present: {body}");
+    assert!(body.contains("action=\"/portal/payment-links\""), "form targets the generator");
+
+    // --- 2. generating a link creates a checkout and redirects back -------------
+    let (status, _, headers) = call(
+        &app,
+        post(
+            "/portal/payment-links",
+            &format!(
+                "csrf={owner_csrf}&amount=250.50&reference=&customer_name=Abe+Bekele&customer_email=abe@shop.test&return_url=https://acme.test/thanks&expires_in=1h"
+            ),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "generate payment link");
+    let location = headers["location"].to_str().unwrap().to_string();
+    let checkout_id = location
+        .strip_prefix("/portal?created=")
+        .expect("redirect back with created id")
+        .to_string();
+    assert!(checkout_id.starts_with("chk_"), "{location}");
+
+    // The checkout row mirrors the form.
+    let (reference, amount_minor, currency, status_str, customer, return_url, expires_at): (
+        String,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = sqlx::query_as(
+        "SELECT reference, amount_minor, currency, status, customer_name, return_url, expires_at \
+         FROM checkouts WHERE id = ?",
+    )
+    .bind(&checkout_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(reference.starts_with("ref_"), "blank reference auto-generated: {reference}");
+    assert_eq!(amount_minor, 25_050);
+    assert_eq!(currency, "ETB");
+    assert_eq!(status_str, "created");
+    assert_eq!(customer.as_deref(), Some("Abe Bekele"));
+    assert_eq!(return_url.as_deref(), Some("https://acme.test/thanks"));
+    let delta = (paybridge::ids::parse_iso(&expires_at).unwrap() - chrono::Utc::now()).num_seconds();
+    assert!((3500..=3660).contains(&delta), "expires in ~1h, got {delta}s");
+
+    // Audited.
+    let (rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'payment_link.created' AND resource_id = ?",
+    )
+    .bind(&checkout_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    // --- 3. the dashboard reveals the shareable link ----------------------------
+    let (status, body, _) = call(
+        &app,
+        get(&format!("/portal?created={checkout_id}"), Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let url = format!("http://paybridge.test/c/{checkout_id}");
+    assert!(body.contains(&url), "payment URL shown: {body}");
+    assert!(body.contains(&reference), "reference echoed in the banner");
+    assert!(body.contains("Copy link"), "copy button present");
+
+    // --- 4. the checkout detail page carries the link for re-copying ------------
+    let (status, body, _) = call(
+        &app,
+        get(&format!("/portal/checkouts/{checkout_id}"), Some(&owner_cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&url), "payment link row on the detail page: {body}");
+
+    // --- 5. validation errors land back on the dashboard as banners -------------
+    // (locations are percent-encoded, so the expectations are too)
+    for (form_body, expected) in [
+        ("amount=abc", "valid%20amount"),
+        ("amount=0", "greater%20than%20zero"),
+        ("amount=12.345", "decimal%20places"),
+        ("amount=500&return_url=not-a-url", "Return%20URL"),
+    ] {
+        let (status, _, headers) = call(
+            &app,
+            post(
+                "/portal/payment-links",
+                &format!("csrf={owner_csrf}&reference=&expires_in=24h&{form_body}"),
+                "application/x-www-form-urlencoded",
+                Some(&owner_cookie),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{form_body}");
+        let location = headers["location"].to_str().unwrap();
+        assert!(location.starts_with("/portal?error="), "{form_body} -> {location}");
+        assert!(location.contains(expected), "{form_body} -> {location}");
+    }
+
+    // --- 6. the prepaid gate: zero credits refuses -------------------------------
+    sqlx::query("UPDATE merchants SET credit_balance = 0 WHERE id = ?")
+        .bind(MERCHANT)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _, headers) = call(
+        &app,
+        post(
+            "/portal/payment-links",
+            &format!("csrf={owner_csrf}&amount=100&reference=ORDER-9&expires_in=24h"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(
+        headers["location"].to_str().unwrap().contains("credit"),
+        "exhausted credit error: {headers:?}"
+    );
+    sqlx::query("UPDATE merchants SET credit_balance = 1000 WHERE id = ?")
+        .bind(MERCHANT)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // --- 7. CSRF is enforced ------------------------------------------------------
+    let (status, _, _) = call(
+        &app,
+        post(
+            "/portal/payment-links",
+            "csrf=wrong&amount=100",
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The merchant always comes from the session — every checkout so far is ours.
+    let (other,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM checkouts WHERE merchant_id != ?")
+        .bind(MERCHANT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(other, 0);
+
+    // --- 8. an explicit reference is used verbatim --------------------------------
+    let (status, _, headers) = call(
+        &app,
+        post(
+            "/portal/payment-links",
+            &format!("csrf={owner_csrf}&amount=99&reference=ORDER-EXPLICIT&expires_in=24h"),
+            "application/x-www-form-urlencoded",
+            Some(&owner_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let location = headers["location"].to_str().unwrap().to_string();
+    let second_id = location.strip_prefix("/portal?created=").unwrap().to_string();
+    let (reference,): (String,) = sqlx::query_as("SELECT reference FROM checkouts WHERE id = ?")
+        .bind(&second_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reference, "ORDER-EXPLICIT");
+}
