@@ -10,6 +10,7 @@ pub mod extract;
 pub mod error;
 pub mod hosted;
 pub mod ids;
+pub mod internal;
 pub mod money;
 pub mod public_verify;
 pub mod state;

@@ -30,6 +30,18 @@ pub struct Config {
     pub admin_password: String,
     /// Email of the bootstrapped superadmin user (see admin::ensure_bootstrap_admin).
     pub admin_email: String,
+    /// Rust platform base URL for `hp_…` API-key introspection. When unset,
+    /// only local `pb_sk_…` keys work (legacy/standalone mode).
+    pub rust_internal_url: Option<String>,
+    /// Shared service-to-service secret (matches the platform's
+    /// INTERNAL_SERVICE_TOKEN). Gates both key introspection and the
+    /// /internal provisioning endpoints. Unset = both disabled.
+    pub service_token: Option<String>,
+    /// Credits granted to a lazily-created shadow merchant on first use.
+    pub initial_credits: i64,
+    /// How long a resolved `hp_…` key identity stays cached. Bounds the
+    /// revocation lag when a key is revoked on the platform.
+    pub key_cache_ttl: Duration,
 }
 
 impl Config {
@@ -72,6 +84,12 @@ impl Config {
             }),
             admin_email: get("PAYBRIDGE_ADMIN_EMAIL")
                 .unwrap_or_else(|| "admin@paybridge.local".into()),
+            rust_internal_url: get("RUST_INTERNAL_URL").map(|u| u.trim_end_matches('/').to_string()),
+            service_token: get("INTERNAL_SERVICE_TOKEN"),
+            initial_credits: get("PAYBRIDGE_INITIAL_CREDITS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            key_cache_ttl: duration_env("KEY_CACHE_TTL", Duration::from_secs(300)),
         }
     }
 }

@@ -49,6 +49,7 @@ pub fn build_app(state: AppState) -> Router {
             post(crate::public_verify::verify),
         )
         .nest("/c", hosted)
+        .nest("/internal", crate::internal::router(state.clone()))
         .nest("/admin", crate::admin::router(state.clone()))
         .nest("/portal", crate::admin::portal_router(state.clone()))
         .route(

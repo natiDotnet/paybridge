@@ -366,12 +366,17 @@ async fn setup() -> (Router, SqlitePool, tempfile::TempDir) {
         static_dir: std::path::PathBuf::from("static"),
         admin_password: ADMIN_PASSWORD.into(),
         admin_email: ADMIN_EMAIL.into(),
+        rust_internal_url: None,
+        service_token: None,
+        initial_credits: 100,
+        key_cache_ttl: Duration::from_secs(300),
     });
     let state = AppState {
         pool: pool.clone(),
         config: config.clone(),
         verifier: Arc::new(paybridge::verify::Verifier::from_config(&config)),
         http: reqwest::Client::new(),
+        auth_cache: std::sync::Arc::new(paybridge::state::AuthCache::new()),
     };
     (build_app(state), pool, tmp)
 }

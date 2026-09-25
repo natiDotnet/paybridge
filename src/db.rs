@@ -7,9 +7,11 @@
 //! decode as i64 on both (INTEGER on SQLite) are BIGINT in the Postgres
 //! schema (migrations_postgres/).
 
+#[cfg(feature = "pg")]
 use std::collections::HashMap;
 #[cfg(not(feature = "pg"))]
 use std::str::FromStr;
+#[cfg(feature = "pg")]
 use std::sync::Mutex;
 
 #[cfg(not(feature = "pg"))]

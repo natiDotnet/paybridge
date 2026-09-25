@@ -31,6 +31,7 @@ async fn main() {
         config,
         verifier,
         http: reqwest::Client::new(),
+        auth_cache: std::sync::Arc::new(paybridge::state::AuthCache::new()),
     };
 
     let bind_addr = state.config.bind.clone();

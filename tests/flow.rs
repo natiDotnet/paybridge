@@ -64,12 +64,17 @@ async fn full_checkout_flow() {
         static_dir: std::path::PathBuf::from("static"),
         admin_password: "test-admin".into(),
         admin_email: "admin@paybridge.test".into(),
+        rust_internal_url: None,
+        service_token: None,
+        initial_credits: 100,
+        key_cache_ttl: Duration::from_secs(300),
     });
     let state = AppState {
         pool,
         config: config.clone(),
         verifier: Arc::new(paybridge::verify::Verifier::from_config(&config)),
         http: reqwest::Client::new(),
+        auth_cache: std::sync::Arc::new(paybridge::state::AuthCache::new()),
     };
     let app = build_app(state.clone());
 
