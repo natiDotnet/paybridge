@@ -3,7 +3,7 @@
 use axum::extract::Request;
 use axum::http::{header, HeaderValue};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -30,7 +30,7 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/", get(crate::hosted::index))
+        .route("/", get(|| async { Redirect::to("/portal") }))
         .route("/api/v1/checkouts", post(crate::api::create_checkout))
         .route(
             "/api/v1/checkouts/{checkout_id}",
