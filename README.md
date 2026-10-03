@@ -193,6 +193,32 @@ cargo run --features pg                  # PostgreSQL — DATABASE_URL must poin
 cargo test
 ```
 
+## Docker deployment
+
+The production image builds the PostgreSQL variant and runs the service on port
+4000. Configure a reachable PostgreSQL database and production secrets through
+your container host's environment settings:
+
+```bash
+docker build -t paybridge .
+docker run --rm -p 4000:4000 \
+  -e DATABASE_URL='postgresql://user:password@host:5432/paybridge?sslmode=require' \
+  -e PAYBRIDGE_BASE_URL='https://paybridge.example.com' \
+  -e PAYBRIDGE_ADMIN_EMAIL='admin@example.com' \
+  -e PAYBRIDGE_ADMIN_PASSWORD='replace-with-a-secret' \
+  -e VERIFIER=http \
+  -e VERIFY_SERVICE_URL='https://verify.example.com' \
+  -e VERIFY_SERVICE_API_KEY='replace-with-a-secret' \
+  paybridge
+```
+
+Do not bake credentials into the image or commit them to the repository. This
+service runs as a persistent web process with background workers; Vercel does
+not deploy arbitrary Docker containers, so this image must be hosted on a
+container platform such as Cloud Run, Fly.io, or Render. Hosting it on Vercel
+would require adapting the application to Vercel Functions and moving the
+background workers to a separate persistent service.
+
 ## Production notes
 
 - SQLite is fine for dev; move to Postgres (schema notes in `docs/SCHEMA.sql`) and use
