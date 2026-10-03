@@ -31,7 +31,7 @@ Dev merchant seeded automatically:
 | API key | `pb_sk_test_acme_local_only` |
 | Merchant | Acme Tickets (dev) |
 | Telebirr wallet | +251900000000 |
-| Webhook endpoint | http://localhost:4001/webhooks (secret `whsec_seed_acme_0123456789abcdef0123456789abcdef`) |
+| Webhook endpoint | <http://localhost:4001/webhooks> (secret `whsec_seed_acme_0123456789abcdef0123456789abcdef`) |
 
 ### Try it
 
@@ -218,6 +218,14 @@ not deploy arbitrary Docker containers, so this image must be hosted on a
 container platform such as Cloud Run, Fly.io, or Render. Hosting it on Vercel
 would require adapting the application to Vercel Functions and moving the
 background workers to a separate persistent service.
+
+GitHub Actions builds and publishes the image to GitHub Container Registry on
+every push and can also be run manually from the Actions tab. The default
+branch is tagged `latest`; every build also gets branch and commit tags. After
+the workflow succeeds, a container host can pull
+`ghcr.io/natidotnet/paybridge:latest` and run it with the environment above.
+GitHub stores the image but does not run the backend. Configure database and
+application secrets on the container host, not in the image or workflow.
 
 ## Production notes
 
